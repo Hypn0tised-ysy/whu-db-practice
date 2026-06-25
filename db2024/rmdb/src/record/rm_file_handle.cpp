@@ -153,7 +153,7 @@ RmPageHandle RmFileHandle::create_new_page_handle() {
     // 2.更新page handle中的相关信息
     // 3.更新file_hdr_
 
-    PageId page_id;
+    PageId page_id{.fd = fd_, .page_no = INVALID_PAGE_ID};
     Page* page = buffer_pool_manager_->new_page(&page_id);
     assert(page != nullptr);
 
