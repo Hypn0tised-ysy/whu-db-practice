@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
+WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -202,6 +202,14 @@ type:
     {
         $$ = std::make_shared<TypeLen>(SV_TYPE_FLOAT, sizeof(float));
     }
+    |   BIGINT
+    {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_BIGINT, sizeof(int64_t));
+    }
+    |   DATETIME
+    {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_DATETIME, 8);
+    }
     ;
 
 valueList:
@@ -218,7 +226,9 @@ valueList:
 value:
         VALUE_INT
     {
-        $$ = std::make_shared<IntLit>($1);
+        auto intlit = std::make_shared<IntLit>($1);
+        intlit->overflow = $<sv_bool>1;
+        $$ = intlit;
     }
     |   VALUE_FLOAT
     {

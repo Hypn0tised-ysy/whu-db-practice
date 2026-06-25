@@ -43,8 +43,23 @@ class InsertExecutor : public AbstractExecutor {
         for (size_t i = 0; i < values_.size(); i++) {
             auto &col = tab_.cols[i];
             auto &val = values_[i];
+            // Allow INT->BIGINT and STRING->DATETIME implicit conversion
             if (col.type != val.type) {
-                throw IncompatibleTypeError(coltype2str(col.type), coltype2str(val.type));
+                if (col.type == TYPE_DATETIME && val.type == TYPE_STRING) {
+                    // Parse datetime from string
+                    val.set_datetime(parse_datetime(val.str_val));
+                } else if (col.type == TYPE_BIGINT && val.type == TYPE_INT) {
+                    // OK: promote INT value to BIGINT column
+                    val.type = TYPE_BIGINT;
+                } else if (col.type == TYPE_INT && val.type == TYPE_BIGINT) {
+                    // BIGINT value into INT column - check range
+                    if (val.bigint_val > INT32_MAX || val.bigint_val < INT32_MIN) {
+                        throw RMDBError("BIGINT value out of INT range");
+                    }
+                    val.type = TYPE_INT;
+                } else {
+                    throw IncompatibleTypeError(coltype2str(col.type), coltype2str(val.type));
+                }
             }
             val.init_raw(col.len);
             memcpy(rec.data + col.offset, val.raw->data, col.len);

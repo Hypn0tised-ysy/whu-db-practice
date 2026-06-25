@@ -73,18 +73,42 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
             // 检查类型匹配
             TabMeta &tab = sm_manager_->db_.get_table(x->tab_name);
             auto col = tab.get_col(set_clause.lhs.col_name);
+            // Handle DATETIME string conversion
+            if (col->type == TYPE_DATETIME && set_clause.rhs.type == TYPE_STRING) {
+                set_clause.rhs.set_datetime(parse_datetime(set_clause.rhs.str_val));
+            }
             if (col->type != set_clause.rhs.type) {
+                bool compatible = false;
+                // INT <-> FLOAT
                 if ((col->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) ||
                     (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT)) {
-                    // Allow implicit type conversion
+                    compatible = true;
                     if (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT) {
                         set_clause.rhs.type = TYPE_FLOAT;
-                        set_clause.rhs.float_val = (float)set_clause.rhs.int_val;
+                        set_clause.rhs.float_val = (float)set_clause.rhs.bigint_val;
                     } else if (col->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) {
                         set_clause.rhs.type = TYPE_INT;
-                        set_clause.rhs.int_val = (int)set_clause.rhs.float_val;
+                        set_clause.rhs.bigint_val = (int64_t)set_clause.rhs.float_val;
                     }
-                } else {
+                }
+                // INT <-> BIGINT (allow implicit conversion)
+                if ((col->type == TYPE_INT && set_clause.rhs.type == TYPE_BIGINT) ||
+                    (col->type == TYPE_BIGINT && set_clause.rhs.type == TYPE_INT)) {
+                    compatible = true;
+                    set_clause.rhs.type = col->type;
+                }
+                // BIGINT <-> FLOAT
+                if ((col->type == TYPE_BIGINT && set_clause.rhs.type == TYPE_FLOAT) ||
+                    (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_BIGINT)) {
+                    compatible = true;
+                    set_clause.rhs.type = col->type;
+                    if (col->type == TYPE_FLOAT) {
+                        set_clause.rhs.float_val = (float)set_clause.rhs.bigint_val;
+                    } else {
+                        set_clause.rhs.bigint_val = (int64_t)set_clause.rhs.float_val;
+                    }
+                }
+                if (!compatible) {
                     throw IncompatibleTypeError(coltype2str(col->type), coltype2str(set_clause.rhs.type));
                 }
             }
@@ -194,6 +218,10 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
         if (cond.is_rhs_val) {
+            // Handle DATETIME string conversion before init_raw
+            if (lhs_type == TYPE_DATETIME && cond.rhs_val.type == TYPE_STRING) {
+                cond.rhs_val.set_datetime(parse_datetime(cond.rhs_val.str_val));
+            }
             cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {
@@ -202,19 +230,43 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
             rhs_type = rhs_col->type;
         }
         if (lhs_type != rhs_type) {
+            bool compatible = false;
+            // INT <-> FLOAT
             if ((lhs_type == TYPE_INT && rhs_type == TYPE_FLOAT) ||
                 (lhs_type == TYPE_FLOAT && rhs_type == TYPE_INT)) {
-                // Allow implicit type conversion between INT and FLOAT
+                compatible = true;
                 if (cond.is_rhs_val) {
                     if (lhs_type == TYPE_FLOAT && rhs_type == TYPE_INT) {
                         cond.rhs_val.type = TYPE_FLOAT;
-                        cond.rhs_val.float_val = (float)cond.rhs_val.int_val;
+                        cond.rhs_val.float_val = (float)cond.rhs_val.bigint_val;
                     } else if (lhs_type == TYPE_INT && rhs_type == TYPE_FLOAT) {
                         cond.rhs_val.type = TYPE_INT;
-                        cond.rhs_val.int_val = (int)cond.rhs_val.float_val;
+                        cond.rhs_val.bigint_val = (int64_t)cond.rhs_val.float_val;
                     }
                 }
-            } else {
+            }
+            // INT <-> BIGINT
+            if ((lhs_type == TYPE_INT && rhs_type == TYPE_BIGINT) ||
+                (lhs_type == TYPE_BIGINT && rhs_type == TYPE_INT)) {
+                compatible = true;
+                if (cond.is_rhs_val) {
+                    cond.rhs_val.type = lhs_type;
+                }
+            }
+            // BIGINT <-> FLOAT
+            if ((lhs_type == TYPE_BIGINT && rhs_type == TYPE_FLOAT) ||
+                (lhs_type == TYPE_FLOAT && rhs_type == TYPE_BIGINT)) {
+                compatible = true;
+                if (cond.is_rhs_val) {
+                    cond.rhs_val.type = lhs_type;
+                    if (lhs_type == TYPE_FLOAT) {
+                        cond.rhs_val.float_val = (float)cond.rhs_val.bigint_val;
+                    } else {
+                        cond.rhs_val.bigint_val = (int64_t)cond.rhs_val.float_val;
+                    }
+                }
+            }
+            if (!compatible) {
                 throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
             }
         }
@@ -225,7 +277,16 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
 Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
     Value val;
     if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(sv_val)) {
-        val.set_int(int_lit->val);
+        // Check for overflow during parsing
+        if (int_lit->overflow) {
+            throw RMDBError("Integer value out of BIGINT range");
+        }
+        // Store as bigint if value exceeds 32-bit range, otherwise as int
+        if (int_lit->val > INT32_MAX || int_lit->val < INT32_MIN) {
+            val.set_bigint(int_lit->val);
+        } else {
+            val.set_int(int_lit->val);
+        }
     } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(sv_val)) {
         val.set_float(float_lit->val);
     } else if (auto str_lit = std::dynamic_pointer_cast<ast::StringLit>(sv_val)) {

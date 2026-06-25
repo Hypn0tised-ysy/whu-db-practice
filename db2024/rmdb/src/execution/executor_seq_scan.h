@@ -137,8 +137,30 @@ private:
 
         // 根据列类型进行比较
         if (col.type == TYPE_INT) {
-            int lhs = *(int *)lhs_val;
-            int rhs = rhs_val.int_val;
+            int32_t lhs = *(int32_t *)lhs_val;
+            int64_t rhs = rhs_val.bigint_val;
+            switch (op) {
+                case OP_EQ: return lhs == rhs;
+                case OP_NE: return lhs != rhs;
+                case OP_LT: return lhs < rhs;
+                case OP_GT: return lhs > rhs;
+                case OP_LE: return lhs <= rhs;
+                case OP_GE: return lhs >= rhs;
+            }
+        } else if (col.type == TYPE_BIGINT) {
+            int64_t lhs = *(int64_t *)lhs_val;
+            int64_t rhs = rhs_val.bigint_val;
+            switch (op) {
+                case OP_EQ: return lhs == rhs;
+                case OP_NE: return lhs != rhs;
+                case OP_LT: return lhs < rhs;
+                case OP_GT: return lhs > rhs;
+                case OP_LE: return lhs <= rhs;
+                case OP_GE: return lhs >= rhs;
+            }
+        } else if (col.type == TYPE_DATETIME) {
+            int64_t lhs = *(int64_t *)lhs_val;
+            int64_t rhs = rhs_val.datetime_val;
             switch (op) {
                 case OP_EQ: return lhs == rhs;
                 case OP_NE: return lhs != rhs;
@@ -177,8 +199,30 @@ private:
     bool eval_binary(char *lhs_val, char *rhs_val, CompOp op, ColType type, int len) {
 
         if (type == TYPE_INT) {
-            int lhs = *(int *)lhs_val;
-            int rhs = *(int *)rhs_val;
+            int32_t lhs = *(int32_t *)lhs_val;
+            int32_t rhs = *(int32_t *)rhs_val;
+            switch (op) {
+                case OP_EQ: return lhs == rhs;
+                case OP_NE: return lhs != rhs;
+                case OP_LT: return lhs < rhs;
+                case OP_GT: return lhs > rhs;
+                case OP_LE: return lhs <= rhs;
+                case OP_GE: return lhs >= rhs;
+            }
+        } else if (type == TYPE_BIGINT) {
+            int64_t lhs = *(int64_t *)lhs_val;
+            int64_t rhs = *(int64_t *)rhs_val;
+            switch (op) {
+                case OP_EQ: return lhs == rhs;
+                case OP_NE: return lhs != rhs;
+                case OP_LT: return lhs < rhs;
+                case OP_GT: return lhs > rhs;
+                case OP_LE: return lhs <= rhs;
+                case OP_GE: return lhs >= rhs;
+            }
+        } else if (type == TYPE_DATETIME) {
+            int64_t lhs = *(int64_t *)lhs_val;
+            int64_t rhs = *(int64_t *)rhs_val;
             switch (op) {
                 case OP_EQ: return lhs == rhs;
                 case OP_NE: return lhs != rhs;

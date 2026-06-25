@@ -14,6 +14,8 @@
 #include "ast.h"
 #include "yacc.tab.h"
 #include <iostream>
+#include <cerrno>
+#include <cstdint>
 
 // automatically update location
 #define YY_USER_ACTION \
@@ -77,6 +79,8 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 "INT" { return INT; }
 "CHAR" { return CHAR; }
 "FLOAT" { return FLOAT; }
+"BIGINT" { return BIGINT; }
+"DATETIME" { return DATETIME; }
 "INDEX" { return INDEX; }
 "AND" { return AND; }
 "JOIN" {return JOIN;}
@@ -107,7 +111,14 @@ single_op ";"|"("|")"|","|"*"|"="|">"|"<"|"."
 }
     /* literals */
 {value_int} {
-    yylval->sv_int = atoi(yytext);
+    char *endptr;
+    errno = 0;
+    yylval->sv_int = strtoll(yytext, &endptr, 10);
+    yylval->sv_bool = (errno == ERANGE);  // Use sv_bool as overflow flag
+    if (errno == ERANGE) {
+        // Overflow detected - store max/min int64 values
+        yylval->sv_int = (yytext[0] == '-') ? INT64_MIN : INT64_MAX;
+    }
     return VALUE_INT;
 }
 {value_float} {

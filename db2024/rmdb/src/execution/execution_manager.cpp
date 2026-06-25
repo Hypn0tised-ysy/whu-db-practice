@@ -179,7 +179,11 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
             std::string col_str;
             char *rec_buf = Tuple->data + col.offset;
             if (col.type == TYPE_INT) {
-                col_str = std::to_string(*(int *)rec_buf);
+                col_str = std::to_string(*(int32_t *)rec_buf);
+            } else if (col.type == TYPE_BIGINT) {
+                col_str = std::to_string(*(int64_t *)rec_buf);
+            } else if (col.type == TYPE_DATETIME) {
+                col_str = format_datetime(*(int64_t *)rec_buf);
             } else if (col.type == TYPE_FLOAT) {
                 std::ostringstream oss;
                 oss << std::fixed << std::setprecision(6) << *(float *)rec_buf;

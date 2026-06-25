@@ -208,7 +208,11 @@ private:
     bool compare_values(char *lhs, char *rhs, ColType type, CompOp op) {
         switch (type) {
             case TYPE_INT:
-                return compare_int(*(int *)lhs, *(int *)rhs, op);
+                return compare_bigint(*(int32_t *)lhs, *(int32_t *)rhs, op);
+            case TYPE_BIGINT:
+                return compare_bigint(*(int64_t *)lhs, *(int64_t *)rhs, op);
+            case TYPE_DATETIME:
+                return compare_bigint(*(int64_t *)lhs, *(int64_t *)rhs, op);
             case TYPE_FLOAT:
                 return compare_float(*(float *)lhs, *(float *)rhs, op);
             case TYPE_STRING:
@@ -218,7 +222,7 @@ private:
         }
     }
 
-    bool compare_int(int lhs, int rhs, CompOp op) {
+    bool compare_bigint(int64_t lhs, int64_t rhs, CompOp op) {
         switch (op) {
             case OP_EQ: return lhs == rhs;
             case OP_NE: return lhs != rhs;

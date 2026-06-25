@@ -3,3 +3,4 @@
 rm: record manager
 sm: system manager 
 sv: scalar value
+lit:literal
