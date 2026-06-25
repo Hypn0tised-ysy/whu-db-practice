@@ -79,9 +79,14 @@ class Portal
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
                     for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                        auto rec = scan->Next();
+                        if (rec != nullptr) {
+                            rids.push_back(scan->rid());
+                        } else {
+                            break;
+                        }
                     }
-                    std::unique_ptr<AbstractExecutor> root =std::make_unique<UpdateExecutor>(sm_manager_, 
+                    std::unique_ptr<AbstractExecutor> root =std::make_unique<UpdateExecutor>(sm_manager_,
                                                             x->tab_name_, x->set_clauses_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -90,7 +95,12 @@ class Portal
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
                     for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                        auto rec = scan->Next();
+                        if (rec != nullptr) {
+                            rids.push_back(scan->rid());
+                        } else {
+                            break;
+                        }
                     }
 
                     std::unique_ptr<AbstractExecutor> root =

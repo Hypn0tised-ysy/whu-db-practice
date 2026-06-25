@@ -171,6 +171,9 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     // 执行query_plan
     for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
         auto Tuple = executorTreeRoot->Next();
+        if (Tuple == nullptr) {
+            break;
+        }
         std::vector<std::string> columns;
         for (auto &col : executorTreeRoot->cols()) {
             std::string col_str;
@@ -178,7 +181,9 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
             if (col.type == TYPE_INT) {
                 col_str = std::to_string(*(int *)rec_buf);
             } else if (col.type == TYPE_FLOAT) {
-                col_str = std::to_string(*(float *)rec_buf);
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << *(float *)rec_buf;
+                col_str = oss.str();
             } else if (col.type == TYPE_STRING) {
                 col_str = std::string((char *)rec_buf, col.len);
                 col_str.resize(strlen(col_str.c_str()));

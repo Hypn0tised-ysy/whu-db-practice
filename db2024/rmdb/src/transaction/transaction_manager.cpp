@@ -26,8 +26,14 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
     // 2. 如果为空指针，创建新事务
     // 3. 把开始事务加入到全局事务表中
     // 4. 返回当前事务指针
-    
-    return nullptr;
+    if (txn == nullptr) {
+        txn_id_t txn_id = next_txn_id_.fetch_add(1);
+        txn = new Transaction(txn_id);
+        txn->set_state(TransactionState::GROWING);
+        std::unique_lock<std::mutex> lock(latch_);
+        txn_map[txn_id] = txn;
+    }
+    return txn;
 }
 
 /**
@@ -42,7 +48,11 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 3. 释放事务相关资源，eg.锁集
     // 4. 把事务日志刷入磁盘中
     // 5. 更新事务状态
-
+    if (txn == nullptr || txn->get_state() == TransactionState::COMMITTED
+        || txn->get_state() == TransactionState::ABORTED) {
+        return;
+    }
+    txn->set_state(TransactionState::COMMITTED);
 }
 
 /**
@@ -57,5 +67,8 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     // 3. 清空事务相关资源，eg.锁集
     // 4. 把事务日志刷入磁盘中
     // 5. 更新事务状态
-    
+    if (txn == nullptr || txn->get_state() == TransactionState::ABORTED) {
+        return;
+    }
+    txn->set_state(TransactionState::ABORTED);
 }

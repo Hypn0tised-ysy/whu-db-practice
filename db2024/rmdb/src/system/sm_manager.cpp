@@ -78,6 +78,7 @@ void SmManager::drop_db(const std::string& db_name) {
     if (system(cmd.c_str()) < 0) {
         throw UnixError();
     }
+
 }
 
 /**
@@ -85,7 +86,31 @@ void SmManager::drop_db(const std::string& db_name) {
  * @param {string&} db_name 数据库名称，与文件夹同名
  */
 void SmManager::open_db(const std::string& db_name) {
-    
+    if (!is_dir(db_name)) {
+        throw DatabaseNotFoundError(db_name);
+    }
+    if (chdir(db_name.c_str()) < 0) {
+        throw UnixError();
+    }
+    // 打开元数据文件
+    std::ifstream ifs(DB_META_NAME);
+    if (!ifs.is_open()) {
+        throw InternalError("Cannot open db meta file");
+    }
+    ifs >> db_;
+    ifs.close();
+
+    // 打开所有表文件
+    for (auto &entry : db_.tabs_) {
+        auto &tab = entry.second;
+        fhs_.emplace(tab.name, rm_manager_->open_file(tab.name));
+    }
+
+    // 打开日志文件
+    if (disk_manager_->is_file(LOG_FILE_NAME)) {
+        int log_fd = disk_manager_->open_file(LOG_FILE_NAME);
+        disk_manager_->SetLogFd(log_fd);
+    }
 }
 
 /**
@@ -101,7 +126,25 @@ void SmManager::flush_meta() {
  * @description: 关闭数据库并把数据落盘
  */
 void SmManager::close_db() {
-    
+    // 刷元数据
+    flush_meta();
+
+    // 关闭所有表文件
+    for (auto &entry : fhs_) {
+        rm_manager_->close_file(entry.second.get());
+    }
+    fhs_.clear();
+
+    // 关闭索引文件
+    for (auto &entry : ihs_) {
+        ix_manager_->close_index(entry.second.get());
+    }
+    ihs_.clear();
+
+    // 返回上级目录
+    if (chdir("..") < 0) {
+        throw UnixError();
+    }
 }
 
 /**
@@ -188,7 +231,30 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
  * @param {Context*} context
  */
 void SmManager::drop_table(const std::string& tab_name, Context* context) {
-    
+    if (!db_.is_table(tab_name)) {
+        throw TableNotFoundError(tab_name);
+    }
+
+    TabMeta &tab = db_.get_table(tab_name);
+
+    // 关闭并删除表文件
+    rm_manager_->close_file(fhs_[tab_name].get());
+    rm_manager_->destroy_file(tab_name);
+    fhs_.erase(tab_name);
+
+    // 删除索引文件
+    for (auto &index : tab.indexes) {
+        std::string index_name = ix_manager_->get_index_name(tab_name, index.cols);
+        ix_manager_->close_index(ihs_[index_name].get());
+        ix_manager_->destroy_index(tab_name, index.cols);
+        ihs_.erase(index_name);
+    }
+
+    // 从元数据中删除表
+    db_.tabs_.erase(tab_name);
+
+    // 刷元数据
+    flush_meta();
 }
 
 /**

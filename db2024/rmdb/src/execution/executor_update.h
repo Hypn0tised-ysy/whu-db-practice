@@ -38,7 +38,43 @@ class UpdateExecutor : public AbstractExecutor {
         context_ = context;
     }
     std::unique_ptr<RmRecord> Next() override {
-        
+        // Initialize raw buffers for set clauses (only once)
+        for (auto &set_clause : set_clauses_) {
+            auto col = tab_.get_col(set_clause.lhs.col_name);
+            if (set_clause.rhs.raw == nullptr) {
+                set_clause.rhs.init_raw(col->len);
+            }
+        }
+
+        for (auto &rid : rids_) {
+            auto rec = fh_->get_record(rid, context_);
+
+            // 应用set子句
+            for (auto &set_clause : set_clauses_) {
+                auto col = tab_.get_col(set_clause.lhs.col_name);
+                memcpy(rec->data + col->offset, set_clause.rhs.raw->data, col->len);
+            }
+
+            // 更新记录
+            fh_->update_record(rid, rec->data, context_);
+
+            // 更新索引
+            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                auto &index = tab_.indexes[i];
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
+                char *key = new char[index.col_tot_len];
+                int offset = 0;
+                for (size_t j = 0; j < index.col_num; ++j) {
+                    memcpy(key + offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                    offset += index.cols[j].len;
+                }
+                // 先删除旧的索引
+                ih->delete_entry(key, context_->txn_);
+                // 再插入新的索引
+                ih->insert_entry(key, rid, context_->txn_);
+                delete[] key;
+            }
+        }
         return nullptr;
     }
 
