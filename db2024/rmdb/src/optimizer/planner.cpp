@@ -22,15 +22,68 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "record_printer.h"
 
-// 目前的索引匹配规则为：完全匹配索引字段，且全部为单点查询，不会自动调整where条件的顺序
+// 索引匹配: 支持最左前缀匹配，支持条件重排序，支持范围查询
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
-    for(auto& cond: curr_conds) {
-        if(cond.is_rhs_val && cond.op == OP_EQ && cond.lhs_col.tab_name.compare(tab_name) == 0)
-            index_col_names.push_back(cond.lhs_col.col_name);
-    }
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
-    if(tab.is_index(index_col_names)) return true;
+
+    // Build a map from column name to condition for quick lookup
+    std::map<std::string, Condition> cond_map;
+    for (auto& cond : curr_conds) {
+        if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name) {
+            cond_map[cond.lhs_col.col_name] = cond;
+        }
+    }
+
+    // Try each index to find the best matching one
+    int best_match_len = 0;
+    std::vector<std::string> best_match_cols;
+
+    for (auto& index : tab.indexes) {
+        int match_len = 0;
+        std::vector<std::string> matched_cols;
+
+        for (int i = 0; i < index.col_num; i++) {
+            std::string col_name = index.cols[i].name;
+            auto it = cond_map.find(col_name);
+            if (it == cond_map.end()) {
+                // This column not in conditions - stop matching
+                // But if previous columns all matched with EQ, we can still use the index
+                break;
+            }
+
+            if (i < index.col_num - 1) {
+                // Not the last column in index - must be EQ to continue matching
+                if (it->second.op == OP_EQ) {
+                    matched_cols.push_back(col_name);
+                    match_len++;
+                } else {
+                    // Range condition on non-last column - can't use more columns
+                    matched_cols.push_back(col_name);
+                    match_len++;
+                    break;
+                }
+            } else {
+                // Last column or beyond - any condition type works
+                matched_cols.push_back(col_name);
+                match_len++;
+            }
+        }
+
+        if (match_len > best_match_len) {
+            // For single-column index, any condition works
+            // For multi-column index, must match at least the first column
+            if (match_len >= 1) {
+                best_match_len = match_len;
+                best_match_cols = matched_cols;
+            }
+        }
+    }
+
+    if (best_match_len > 0) {
+        index_col_names = best_match_cols;
+        return true;
+    }
     return false;
 }
 

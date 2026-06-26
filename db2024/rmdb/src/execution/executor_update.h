@@ -49,6 +49,19 @@ class UpdateExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             auto rec = fh_->get_record(rid, context_);
 
+            // Build old index keys before modification
+            std::vector<std::vector<char>> old_keys;
+            for (size_t i = 0; i < tab_.indexes.size(); ++i) {
+                auto &index = tab_.indexes[i];
+                std::vector<char> key(index.col_tot_len);
+                int key_offset = 0;
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(key.data() + key_offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                    key_offset += index.cols[j].len;
+                }
+                old_keys.push_back(std::move(key));
+            }
+
             // 应用set子句
             for (auto &set_clause : set_clauses_) {
                 auto col = tab_.get_col(set_clause.lhs.col_name);
@@ -58,21 +71,24 @@ class UpdateExecutor : public AbstractExecutor {
             // 更新记录
             fh_->update_record(rid, rec->data, context_);
 
-            // 更新索引
+            // 更新索引: delete old entry, insert new entry
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {
                 auto &index = tab_.indexes[i];
                 auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();
-                char *key = new char[index.col_tot_len];
-                int offset = 0;
-                for (size_t j = 0; j < index.col_num; ++j) {
-                    memcpy(key + offset, rec->data + index.cols[j].offset, index.cols[j].len);
-                    offset += index.cols[j].len;
+
+                // Build new key from modified record
+                char *new_key = new char[index.col_tot_len];
+                int key_offset = 0;
+                for (int j = 0; j < index.col_num; ++j) {
+                    memcpy(new_key + key_offset, rec->data + index.cols[j].offset, index.cols[j].len);
+                    key_offset += index.cols[j].len;
                 }
-                // 先删除旧的索引
-                ih->delete_entry(key, context_->txn_);
-                // 再插入新的索引
-                ih->insert_entry(key, rid, context_->txn_);
-                delete[] key;
+
+                // Delete old index entry using old key
+                ih->delete_entry(old_keys[i].data(), context_->txn_);
+                // Insert new index entry using new key
+                ih->insert_entry(new_key, rid, context_->txn_);
+                delete[] new_key;
             }
         }
         return nullptr;
