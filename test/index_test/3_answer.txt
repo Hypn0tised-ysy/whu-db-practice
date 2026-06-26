@@ -1,0 +1,13 @@
+-- 3、索引维护：预期输出
+
+| w_id | name |
+| 10 | qweruiop |
+
+| w_id | name |
+
+| w_id | name |
+| 10 | qweruiop |
+
+| w_id | name |
+| 500 | lastdanc |
+| 507 | asdfhjkl |

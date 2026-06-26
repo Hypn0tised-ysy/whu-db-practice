@@ -1,0 +1,23 @@
+-- 2、索引查询：预期输出
+
+| w_id | name |
+| 10 | qweruiop |
+
+| w_id | name |
+| 500 | bgtyhnmj |
+
+| w_id | name |
+| 10 | qweruiop |
+
+| w_id | name |
+| 10 | qweruiop |
+
+| w_id | name |
+| 500 | bgtyhnmj |
+
+| w_id | name |
+| 100 | qwerghjk |
+
+| w_id | name |
+| 10 | qweruiop |
+| 100 | qwerghjk |

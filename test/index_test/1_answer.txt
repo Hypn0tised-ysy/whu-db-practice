@@ -1,0 +1,8 @@
+-- 1、创建、删除、展示索引：预期输出
+
+| warehouse | unique | (id) |
+
+| warehouse | unique | (id) |
+| warehouse | unique | (id,name) |
+
+-- 第三个 show index from warehouse; 没有输出
