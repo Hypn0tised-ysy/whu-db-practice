@@ -46,13 +46,10 @@ class InsertExecutor : public AbstractExecutor {
             // Allow INT->BIGINT and STRING->DATETIME implicit conversion
             if (col.type != val.type) {
                 if (col.type == TYPE_DATETIME && val.type == TYPE_STRING) {
-                    // Parse datetime from string
                     val.set_datetime(parse_datetime(val.str_val));
                 } else if (col.type == TYPE_BIGINT && val.type == TYPE_INT) {
-                    // OK: promote INT value to BIGINT column
                     val.type = TYPE_BIGINT;
                 } else if (col.type == TYPE_INT && val.type == TYPE_BIGINT) {
-                    // BIGINT value into INT column - check range
                     if (val.bigint_val > INT32_MAX || val.bigint_val < INT32_MIN) {
                         throw RMDBError("BIGINT value out of INT range");
                     }
@@ -64,10 +61,32 @@ class InsertExecutor : public AbstractExecutor {
             val.init_raw(col.len);
             memcpy(rec.data + col.offset, val.raw->data, col.len);
         }
+
+        // Check uniqueness constraints BEFORE inserting
+        // For a unique index, each indexed column must be unique individually
+        for(size_t idx = 0; idx < tab_.indexes.size(); ++idx) {
+            auto& index = tab_.indexes[idx];
+
+            // Scan all existing table records to check each indexed column
+            RmScan table_scan(fh_);
+            while (!table_scan.is_end()) {
+                auto existing_rec = fh_->get_record(table_scan.rid(), context_);
+                // Check each indexed column for duplicates
+                for(int j = 0; j < index.col_num; ++j) {
+                    if (memcmp(rec.data + index.cols[j].offset,
+                               existing_rec->data + index.cols[j].offset,
+                               index.cols[j].len) == 0) {
+                        throw RMDBError("Duplicate entry for unique index");
+                    }
+                }
+                table_scan.next();
+            }
+        }
+
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
-        
-        // Insert into index
+
+        // Insert into indexes
         for(size_t idx = 0; idx < tab_.indexes.size(); ++idx) {
             auto& index = tab_.indexes[idx];
             auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name_, index.cols)).get();

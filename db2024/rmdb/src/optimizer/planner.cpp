@@ -22,16 +22,17 @@ See the Mulan PSL v2 for more details. */
 #include "index/ix.h"
 #include "record_printer.h"
 
-// 索引匹配: 支持最左前缀匹配，支持条件重排序，支持范围查询
+// 目前的索引匹配规则为：完全匹配索引字段，且全部为单点查询，不会自动调整where条件的顺序
+// 已修改为：支持最左前缀匹配，支持条件重排序，支持范围查询
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
 
-    // Build a map from column name to condition for quick lookup
-    std::map<std::string, Condition> cond_map;
+    // Build a multimap from column name to condition for quick lookup
+    std::multimap<std::string, Condition> cond_map;
     for (auto& cond : curr_conds) {
         if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name) {
-            cond_map[cond.lhs_col.col_name] = cond;
+            cond_map.emplace(cond.lhs_col.col_name, cond);
         }
     }
 
@@ -48,31 +49,37 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
             auto it = cond_map.find(col_name);
             if (it == cond_map.end()) {
                 // This column not in conditions - stop matching
-                // But if previous columns all matched with EQ, we can still use the index
                 break;
             }
 
+            // Check if ANY condition on this column is usable
+            bool has_eq = false, has_range = false;
+            auto range = cond_map.equal_range(col_name);
+            for (auto ci = range.first; ci != range.second; ++ci) {
+                if (ci->second.op == OP_EQ) has_eq = true;
+                else has_range = true;
+            }
+
             if (i < index.col_num - 1) {
-                // Not the last column in index - must be EQ to continue matching
-                if (it->second.op == OP_EQ) {
+                // Not the last column in index - must have EQ to continue
+                if (has_eq) {
                     matched_cols.push_back(col_name);
                     match_len++;
-                } else {
-                    // Range condition on non-last column - can't use more columns
+                } else if (has_range) {
                     matched_cols.push_back(col_name);
                     match_len++;
                     break;
+                } else {
+                    break;
                 }
             } else {
-                // Last column or beyond - any condition type works
+                // Last column - any condition works
                 matched_cols.push_back(col_name);
                 match_len++;
             }
         }
 
         if (match_len > best_match_len) {
-            // For single-column index, any condition works
-            // For multi-column index, must match at least the first column
             if (match_len >= 1) {
                 best_match_len = match_len;
                 best_match_cols = matched_cols;
@@ -81,8 +88,26 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
     }
 
     if (best_match_len > 0) {
-        index_col_names = best_match_cols;
-        return true;
+        // Return ALL index column names (not just matched prefix)
+        // so that get_index_meta can find multi-column indexes
+        for (auto& index : tab.indexes) {
+            if (index.col_num >= best_match_len) {
+                bool prefix_match = true;
+                for (int i = 0; i < best_match_len; i++) {
+                    if (index.cols[i].name != best_match_cols[i]) {
+                        prefix_match = false;
+                        break;
+                    }
+                }
+                if (prefix_match && (int)index.col_num >= best_match_len) {
+                    index_col_names.clear();
+                    for (int i = 0; i < index.col_num; i++) {
+                        index_col_names.push_back(index.cols[i].name);
+                    }
+                    return true;
+                }
+            }
+        }
     }
     return false;
 }

@@ -12,7 +12,16 @@ See the Mulan PSL v2 for more details. */
 
 #include "ix_scan.h"
 
+/**
+ * @brief 在当前node中查找第一个>=target的key_idx
+ *
+ * @return key_idx，范围为[0,num_key)，如果返回的key_idx=num_key，则表示target大于最后一个key
+ * @note 返回key index（同时也是rid index），作为slot no
+ */
 int IxNodeHandle::lower_bound(const char *target) const {
+    // Todo:
+    // 查找当前节点中第一个大于等于target的key，并返回key的位置给上层
+    // 提示: 可以采用多种查找方式，如顺序遍历、二分查找等；使用ix_compare()函数进行比较
     int lo = 0, hi = page_hdr->num_key;
     while (lo < hi) {
         int mid = lo + (hi - lo) / 2;
@@ -26,7 +35,16 @@ int IxNodeHandle::lower_bound(const char *target) const {
     return lo;
 }
 
+/**
+ * @brief 在当前node中查找第一个>target的key_idx
+ *
+ * @return key_idx，范围为[1,num_key)，如果返回的key_idx=num_key，则表示target大于等于最后一个key
+ * @note 注意此处的范围从1开始
+ */
 int IxNodeHandle::upper_bound(const char *target) const {
+    // Todo:
+    // 查找当前节点中第一个大于target的key，并返回key的位置给上层
+    // 提示: 可以采用多种查找方式：顺序遍历、二分查找等；使用ix_compare()函数进行比较
     int lo = 0, hi = page_hdr->num_key;
     while (lo < hi) {
         int mid = lo + (hi - lo) / 2;
@@ -40,7 +58,20 @@ int IxNodeHandle::upper_bound(const char *target) const {
     return lo;
 }
 
+/**
+ * @brief 用于叶子结点根据key来查找该结点中的键值对
+ * 值value作为传出参数，函数返回是否查找成功
+ *
+ * @param key 目标key
+ * @param[out] value 传出参数，目标key对应的Rid
+ * @return 目标key是否存在
+ */
 bool IxNodeHandle::leaf_lookup(const char *key, Rid **value) {
+    // Todo:
+    // 1. 在叶子节点中获取目标key所在位置
+    // 2. 判断目标key是否存在
+    // 3. 如果存在，获取key对应的Rid，并赋值给传出参数value
+    // 提示：可以调用lower_bound()和get_rid()函数。
     int pos = lower_bound(key);
     if (pos < page_hdr->num_key) {
         char *found_key = get_key(pos);
@@ -54,30 +85,49 @@ bool IxNodeHandle::leaf_lookup(const char *key, Rid **value) {
     return false;
 }
 
+/**
+ * 用于内部结点（非叶子节点）查找目标key所在的孩子结点（子树）
+ * @param key 目标key
+ * @return page_id_t 目标key所在的孩子节点（子树）的存储页面编号
+ */
 page_id_t IxNodeHandle::internal_lookup(const char *key) {
-    int pos = upper_bound(key);
-    // child pointer at pos (if pos == num_key, it's the last child pointer)
-    if (pos >= page_hdr->num_key) pos = page_hdr->num_key - 1;
-    // For non-leaf nodes, the child pointer before the position `pos` is at index `pos`
-    // Actually: keys[i] >= key means go to child[i], otherwise go to child[i+1]
-    // upper_bound returns first index where keys[i] > key
-    // So child index = upper_bound(key) gives the right child to follow
-    // Wait: standard B+tree internal lookup:
-    // Find smallest i such that key < keys[i], then go to child[i]
-    // If key >= all keys, go to child[num_key]
-    int child_idx = upper_bound(key);
+    // Todo:
+    // 1. 查找当前非叶子节点中目标key所在孩子节点（子树）的位置
+    // 2. 获取该孩子节点（子树）所在页面的编号
+    // 3. 返回页面编号
+    int child_idx = upper_bound(key) - 1;
+    if (child_idx < 0) {
+        child_idx = 0;
+    }
     return value_at(child_idx);
 }
 
+/**
+ * @brief 在指定位置插入n个连续的键值对
+ * 将key的前n位插入到原来keys中的pos位置；将rid的前n位插入到原来rids中的pos位置
+ *
+ * @param pos 要插入键值对的位置
+ * @param (key, rid) 连续键值对的起始地址，也就是第一个键值对，可以通过(key, rid)来获取n个键值对
+ * @param n 键值对数量
+ * @note [0,pos)           [pos,num_key)
+ *                            key_slot
+ *                            /      \
+ *                           /        \
+ *       [0,pos)     [pos,pos+n)   [pos+n,num_key+n)
+ *                      key           key_slot
+ */
 void IxNodeHandle::insert_pairs(int pos, const char *key, const Rid *rid, int n) {
+    // Todo:
+    // 1. 判断pos的合法性
+    // 2. 通过key获取n个连续键值对的key值，并把n个key值插入到pos位置
+    // 3. 通过rid获取n个连续键值对的rid值，并把n个rid值插入到pos位置
+    // 4. 更新当前节点的键数量
     assert(pos >= 0 && pos <= page_hdr->num_key);
-    // Shift existing keys and rids
     int num_key = page_hdr->num_key;
     for (int i = num_key - 1; i >= pos; i--) {
         memcpy(get_key(i + n), get_key(i), file_hdr->col_tot_len_);
         rids[i + n] = rids[i];
     }
-    // Insert new pairs
     for (int i = 0; i < n; i++) {
         memcpy(get_key(pos + i), key + i * file_hdr->col_tot_len_, file_hdr->col_tot_len_);
         rids[pos + i] = rid[i];
@@ -85,13 +135,23 @@ void IxNodeHandle::insert_pairs(int pos, const char *key, const Rid *rid, int n)
     page_hdr->num_key += n;
 }
 
+/**
+ * @brief 用于在结点中插入单个键值对。
+ * 函数返回插入后的键值对数量
+ *
+ * @param (key, value) 要插入的键值对
+ * @return int 键值对数量
+ */
 int IxNodeHandle::insert(const char *key, const Rid &value) {
+    // Todo:
+    // 1. 查找要插入的键值对应该插入到当前节点的哪个位置
+    // 2. 如果key重复则不插入
+    // 3. 如果key不重复则插入键值对
+    // 4. 返回完成插入操作之后的键值对数量
     int pos = lower_bound(key);
-    // Check for duplicate
     if (pos < page_hdr->num_key) {
         char *found_key = get_key(pos);
         if (ix_compare(found_key, key, file_hdr->col_types_, file_hdr->col_lens_) == 0) {
-            // Duplicate key - throw error for unique index
             throw RMDBError("Duplicate entry for unique index");
         }
     }
@@ -99,6 +159,11 @@ int IxNodeHandle::insert(const char *key, const Rid &value) {
     return page_hdr->num_key;
 }
 
+/**
+ * @brief 用于在结点中的指定位置删除单个键值对
+ *
+ * @param pos 要删除键值对的位置
+ */
 void IxNodeHandle::erase_pair(int pos) {
     assert(pos >= 0 && pos < page_hdr->num_key);
     int num_key = page_hdr->num_key;
@@ -213,13 +278,12 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
         IxNodeHandle *new_root = create_node();
         new_root->page_hdr->is_leaf = false;
         new_root->page_hdr->parent = IX_NO_PAGE;
-        new_root->set_size(1);
+        new_root->set_size(2);
 
-        // Set first child pointer
+        // Internal nodes store one (minimum key, child page) pair per child.
+        memcpy(new_root->get_key(0), old_node->get_key(0), file_hdr_->col_tot_len_);
         new_root->set_rid(0, Rid{old_node->get_page_no(), -1});
-        // Set key as new_node's first key
-        memcpy(new_root->get_key(0), new_node->get_key(0), file_hdr_->col_tot_len_);
-        // Set second child pointer
+        memcpy(new_root->get_key(1), new_node->get_key(0), file_hdr_->col_tot_len_);
         new_root->set_rid(1, Rid{new_node->get_page_no(), -1});
 
         old_node->set_parent_page_no(new_root->get_page_no());
@@ -253,7 +317,12 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
         throw InternalError("Cannot find leaf page for insert");
     }
 
-    int old_size = leaf->get_size();
+    std::vector<char> old_first_key(file_hdr_->col_tot_len_);
+    bool old_first_key_valid = leaf->get_size() > 0;
+    if (old_first_key_valid) {
+        memcpy(old_first_key.data(), leaf->get_key(0), file_hdr_->col_tot_len_);
+    }
+
     leaf->insert(key, value);
     page_id_t leaf_page = leaf->get_page_no();
 
@@ -261,6 +330,9 @@ page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transac
         IxNodeHandle *new_leaf = split(leaf);
         insert_into_parent(leaf, new_leaf->get_key(0), new_leaf, transaction);
         buffer_pool_manager_->unpin_page(new_leaf->get_page_id(), true);
+    } else if (old_first_key_valid &&
+               ix_compare(old_first_key.data(), leaf->get_key(0), file_hdr_->col_types_, file_hdr_->col_lens_) != 0) {
+        maintain_parent(leaf);
     }
 
     buffer_pool_manager_->unpin_page(leaf->get_page_id(), true);

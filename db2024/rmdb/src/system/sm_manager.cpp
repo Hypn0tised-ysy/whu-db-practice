@@ -285,6 +285,13 @@ void SmManager::drop_table(const std::string& tab_name, Context* context) {
  * @param {Context*} context
  */
 void SmManager::create_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
+    // Todo:
+    // 1. 检查索引是否已存在
+    // 2. 获取索引列元数据
+    // 3. 创建索引元数据并添加到表元数据中
+    // 4. 创建索引文件并打开
+    // 5. 从已有数据构建索引
+    // 6. 刷元数据
     TabMeta &tab = db_.get_table(tab_name);
 
     // Check if index already exists
@@ -344,6 +351,11 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
  * @param {Context*} context
  */
 void SmManager::drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
+    // Todo:
+    // 1. 获取表元数据
+    // 2. 查找并删除索引元数据
+    // 3. 关闭并删除索引文件
+    // 4. 刷元数据
     TabMeta &tab = db_.get_table(tab_name);
 
     // Find and remove the index from tab meta

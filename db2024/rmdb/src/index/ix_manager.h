@@ -162,6 +162,10 @@ class IxManager {
         disk_manager_->write_page(ih->fd_, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager_->flush_all_pages(ih->fd_);
+        // 删除缓冲池中该fd的所有页面，避免fd重用后读到旧页面
+        for (int page_no = 0; page_no < ih->file_hdr_->num_pages_; page_no++) {
+            buffer_pool_manager_->delete_page(PageId{ih->fd_, page_no});
+        }
         disk_manager_->close_file(ih->fd_);
     }
 };
