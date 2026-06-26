@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
+WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE SUM MAX MIN COUNT AS
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -44,7 +44,9 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP 
 %type <sv_str> tbName colName
 %type <sv_strs> tableList colNameList
 %type <sv_col> col
-%type <sv_cols> colList selector
+%type <sv_str> opt_as_alias
+%type <sv_cols> colList selector aggItemList
+%type <sv_col> aggItem
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
@@ -358,6 +360,71 @@ selector:
         $$ = {};
     }
     |   colList
+    |   aggItemList
+    ;
+
+aggItemList:
+        aggItem
+    {
+        $$ = std::vector<std::shared_ptr<Col>>{$1};
+    }
+    |   aggItemList ',' aggItem
+    {
+        $$.push_back($3);
+    }
+    ;
+
+aggItem:
+        col
+    {
+        $$ = $1;
+    }
+    |   SUM '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_SUM;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   MAX '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_MAX;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   MIN '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_MIN;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   COUNT '(' '*' ')' opt_as_alias
+    {
+        auto c = std::make_shared<Col>("", "");
+        c->agg_type = AGG_COUNT_STAR;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   COUNT '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_COUNT;
+        c->alias = $5;
+        $$ = c;
+    }
+    ;
+
+opt_as_alias:
+        /* empty */
+    {
+        $$ = "";
+    }
+    |   AS IDENTIFIER
+    {
+        $$ = $2;
+    }
     ;
 
 tableList:

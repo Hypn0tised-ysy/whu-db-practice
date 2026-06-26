@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 #include <vector>
 #include <string>
 #include <memory>
+#include "defs.h"
 
 enum JoinType {
     INNER_JOIN, LEFT_JOIN, RIGHT_JOIN, FULL_JOIN
@@ -149,12 +150,21 @@ struct BoolLit : public Value {
     BoolLit(bool val_) : val(val_) {}
 };
 
+using ::AggType;
+using ::AGG_NONE; using ::AGG_SUM; using ::AGG_MAX; using ::AGG_MIN;
+using ::AGG_COUNT; using ::AGG_COUNT_STAR;
+
 struct Col : public Expr {
     std::string tab_name;
     std::string col_name;
+    AggType agg_type = AGG_NONE;
+    std::string alias;  // AS alias for aggregate output
 
     Col(std::string tab_name_, std::string col_name_) :
             tab_name(std::move(tab_name_)), col_name(std::move(col_name_)) {}
+
+    Col(std::string tab_name_, std::string col_name_, AggType agg, std::string als) :
+            tab_name(std::move(tab_name_)), col_name(std::move(col_name_)), agg_type(agg), alias(std::move(als)) {}
 };
 
 struct SetClause : public TreeNode {

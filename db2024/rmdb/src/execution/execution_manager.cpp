@@ -154,7 +154,12 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     std::vector<std::string> captions;
     captions.reserve(sel_cols.size());
     for (auto &sel_col : sel_cols) {
-        captions.push_back(sel_col.col_name);
+        // Use alias if available, otherwise use column name
+        if (!sel_col.alias.empty()) {
+            captions.push_back(sel_col.alias);
+        } else {
+            captions.push_back(sel_col.col_name);
+        }
     }
 
     // Print header into buffer

@@ -28,6 +28,8 @@ std::istream &operator>>(std::istream &is, T &enum_val) {
     return is;
 }
 
+enum AggType { AGG_NONE, AGG_SUM, AGG_MAX, AGG_MIN, AGG_COUNT, AGG_COUNT_STAR };
+
 struct Rid {
     int page_no;
     int slot_no;

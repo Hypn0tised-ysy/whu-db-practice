@@ -31,7 +31,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
 
         // 处理target list，再target list中添加上表名，例如 a.id
         for (auto &sv_sel_col : x->cols) {
-            TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name};
+            TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name,
+                              .alias = sv_sel_col->alias, .agg_type = sv_sel_col->agg_type};
             query->cols.push_back(sel_col);
         }
         
@@ -46,6 +47,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         } else {
             // infer table name from column name
             for (auto &sel_col : query->cols) {
+                // Skip column check for COUNT(*) which has no column reference
+                if (sel_col.agg_type == ast::AGG_COUNT_STAR) continue;
                 sel_col = check_column(all_cols, sel_col);  // 列元数据校验
             }
         }

@@ -19,6 +19,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_index_scan.h"
+#include "execution/executor_aggregate.h"
 #include "execution/executor_update.h"
 #include "execution/executor_insert.h"
 #include "execution/executor_delete.h"
@@ -166,7 +167,18 @@ class Portal
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context)
     {
         if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)){
-            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context), 
+            // Check if any selected column has an aggregate function
+            bool has_agg = false;
+            for (auto &col : x->sel_cols_) {
+                if (col.agg_type != ast::AGG_NONE) { has_agg = true; break; }
+            }
+            if (has_agg) {
+                // For aggregate queries: Scan -> Aggregate -> (Projection for output)
+                return std::make_unique<AggregateExecutor>(
+                    convert_plan_executor(x->subplan_, context),
+                    x->sel_cols_);
+            }
+            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
                                                         x->sel_cols_);
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
