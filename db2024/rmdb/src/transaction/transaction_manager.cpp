@@ -52,6 +52,12 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         || txn->get_state() == TransactionState::ABORTED) {
         return;
     }
+    // 释放所有锁
+    auto lock_set = txn->get_lock_set();
+    for (auto &lid : *lock_set) {
+        lock_manager_->unlock(txn, lid);
+    }
+    lock_set->clear();
     txn->set_state(TransactionState::COMMITTED);
 }
 
@@ -125,5 +131,11 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         }
         delete wr;
     }
+    // 释放所有锁
+    auto lock_set = txn->get_lock_set();
+    for (auto &lid : *lock_set) {
+        lock_manager_->unlock(txn, lid);
+    }
+    lock_set->clear();
     txn->set_state(TransactionState::ABORTED);
 }

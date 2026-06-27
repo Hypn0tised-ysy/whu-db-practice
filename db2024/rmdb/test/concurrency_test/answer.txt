@@ -1,0 +1,20 @@
+-- 并发控制测试预期结果
+
+-- Test 1: Dirty Read Prevention
+-- Txn1: begin; update (X lock on row 2); abort (rollback)
+-- Txn2: begin; select row 2 (S lock conflicts → no-wait abort)
+-- Txn2 receives: abort
+-- Final: row 2 unchanged (95.0)
+
+Q1 Final state:
+| id | name | score |
+| 2 | xiaoming | 95.000000 |
+
+-- Test 2: Basic Lock + Commit
+-- Txn1: begin; update; commit
+-- Lock released at commit
+-- Final: row 1 updated (99.0)
+
+Q2:
+| id | name | score |
+| 1 | xiaohong | 99.000000 |

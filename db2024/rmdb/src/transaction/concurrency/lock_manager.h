@@ -17,6 +17,7 @@ See the Mulan PSL v2 for more details. */
 static const std::string GroupLockModeStr[10] = {"NON_LOCK", "IS", "IX", "S", "X", "SIX"};
 
 class LockManager {
+public:
     /* 加锁类型，包括共享锁、排他锁、意向共享锁、意向排他锁、SIX（意向排他锁+共享锁） */
     enum class LockMode { SHARED, EXLUCSIVE, INTENTION_SHARED, INTENTION_EXCLUSIVE, S_IX };
 
@@ -62,6 +63,7 @@ public:
     bool unlock(Transaction* txn, LockDataId lock_data_id);
 
 private:
+    bool lock(Transaction* txn, const LockDataId &lock_data_id, LockMode lock_mode);
     std::mutex latch_;      // 用于锁表的并发
     std::unordered_map<LockDataId, LockRequestQueue> lock_table_;   // 全局锁表
 };

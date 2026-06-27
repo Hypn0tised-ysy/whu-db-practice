@@ -38,6 +38,11 @@ class DeleteExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         for (auto &rid : rids_) {
+            // 加X锁
+            if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+                context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
+            }
+
             auto rec = fh_->get_record(rid, context_);
 
             // 记录写操作（保存旧值，用于事务回滚）

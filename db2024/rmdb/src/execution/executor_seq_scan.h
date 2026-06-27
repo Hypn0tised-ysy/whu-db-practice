@@ -64,6 +64,11 @@ class SeqScanExecutor : public AbstractExecutor {
             return nullptr;
         }
 
+        // 加S锁（读锁）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid_, fh_->GetFd());
+        }
+
         // 读取当前记录
         auto rec = fh_->get_record(rid_, context_);
 

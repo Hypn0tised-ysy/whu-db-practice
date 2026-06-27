@@ -86,6 +86,11 @@ class InsertExecutor : public AbstractExecutor {
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
 
+        // 加X锁（写锁）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid_, fh_->GetFd());
+        }
+
         // Insert into indexes
         for(size_t idx = 0; idx < tab_.indexes.size(); ++idx) {
             auto& index = tab_.indexes[idx];
