@@ -49,6 +49,12 @@ class UpdateExecutor : public AbstractExecutor {
         for (auto &rid : rids_) {
             auto rec = fh_->get_record(rid, context_);
 
+            // 记录写操作（保存旧值，用于事务回滚）
+            if (context_->txn_ != nullptr) {
+                auto wr = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *rec);
+                context_->txn_->append_write_record(wr);
+            }
+
             // Build old index keys from original record
             std::vector<std::vector<char>> old_keys;
             for (size_t i = 0; i < tab_.indexes.size(); ++i) {

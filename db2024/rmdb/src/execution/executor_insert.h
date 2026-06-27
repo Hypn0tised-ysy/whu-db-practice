@@ -99,6 +99,12 @@ class InsertExecutor : public AbstractExecutor {
             ih->insert_entry(key, rid_, context_->txn_);
             delete[] key;
         }
+
+        // 记录写操作，用于事务回滚
+        if (context_->txn_ != nullptr) {
+            auto wr = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_);
+            context_->txn_->append_write_record(wr);
+        }
         return nullptr;
     }
     Rid &rid() override { return rid_; }

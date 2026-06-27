@@ -70,5 +70,60 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     if (txn == nullptr || txn->get_state() == TransactionState::ABORTED) {
         return;
     }
+    // 回滚所有写操作（逆序回滚）
+    auto &write_set = *txn->get_write_set();
+    while (!write_set.empty()) {
+        WriteRecord *wr = write_set.back();
+        write_set.pop_back();
+        std::string &tab_name = wr->GetTableName();
+        RmFileHandle *fh = sm_manager_->fhs_.at(tab_name).get();
+        if (wr->GetWriteType() == WType::INSERT_TUPLE) {
+            // INSERT → 删除插入的记录
+            fh->delete_record(wr->GetRid(), nullptr);
+            // 也删除索引条目
+            TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+            for (auto &index : tab.indexes) {
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
+                auto rec = fh->get_record(wr->GetRid(), nullptr);
+                char *key = new char[index.col_tot_len];
+                int off = 0;
+                for (auto &col : index.cols) { memcpy(key+off, rec->data+col.offset, col.len); off+=col.len; }
+                ih->delete_entry(key, txn);
+                delete[] key;
+            }
+        } else if (wr->GetWriteType() == WType::DELETE_TUPLE) {
+            // DELETE → 重新插入旧记录
+            fh->insert_record(wr->GetRid(), wr->GetRecord().data);
+            TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+            for (auto &index : tab.indexes) {
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
+                char *key = new char[index.col_tot_len];
+                int off = 0;
+                for (auto &col : index.cols) { memcpy(key+off, wr->GetRecord().data+col.offset, col.len); off+=col.len; }
+                ih->insert_entry(key, wr->GetRid(), txn);
+                delete[] key;
+            }
+        } else if (wr->GetWriteType() == WType::UPDATE_TUPLE) {
+            // UPDATE → 恢复旧记录
+            fh->update_record(wr->GetRid(), wr->GetRecord().data, nullptr);
+            TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+            for (auto &index : tab.indexes) {
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
+                // 删除新索引条目，插入旧索引条目
+                auto cur_rec = fh->get_record(wr->GetRid(), nullptr);
+                char *new_key = new char[index.col_tot_len];
+                int off = 0;
+                for (auto &col : index.cols) { memcpy(new_key+off, cur_rec->data+col.offset, col.len); off+=col.len; }
+                ih->delete_entry(new_key, txn);
+                delete[] new_key;
+                char *old_key = new char[index.col_tot_len];
+                off = 0;
+                for (auto &col : index.cols) { memcpy(old_key+off, wr->GetRecord().data+col.offset, col.len); off+=col.len; }
+                ih->insert_entry(old_key, wr->GetRid(), txn);
+                delete[] old_key;
+            }
+        }
+        delete wr;
+    }
     txn->set_state(TransactionState::ABORTED);
 }
