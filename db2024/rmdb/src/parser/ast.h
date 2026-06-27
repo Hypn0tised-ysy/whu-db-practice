@@ -186,10 +186,9 @@ struct BinaryExpr : public TreeNode {
 
 struct OrderBy : public TreeNode
 {
-    std::shared_ptr<Col> cols;
-    OrderByDir orderby_dir;
-    OrderBy( std::shared_ptr<Col> cols_, OrderByDir orderby_dir_) :
-       cols(std::move(cols_)), orderby_dir(std::move(orderby_dir_)) {}
+    std::vector<std::shared_ptr<Col>> cols;
+    std::vector<OrderByDir> orderby_dirs;
+    OrderBy() = default;
 };
 
 struct InsertStmt : public TreeNode {
@@ -239,6 +238,8 @@ struct SelectStmt : public TreeNode {
     
     bool has_sort;
     std::shared_ptr<OrderBy> order;
+    bool has_limit = false;
+    int limit_val = 0;
 
 
     SelectStmt(std::vector<std::shared_ptr<Col>> cols_,

@@ -353,13 +353,18 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
         const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
         all_cols.insert(all_cols.end(), sel_tab_cols.begin(), sel_tab_cols.end());
     }
-    TabCol sel_col;
-    for (auto &col : all_cols) {
-        if(col.name.compare(x->order->cols->col_name) == 0 )
-        sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+    std::vector<TabCol> sel_cols;
+    std::vector<bool> is_desc;
+    for (size_t i = 0; i < x->order->cols.size(); i++) {
+        for (auto &col : all_cols) {
+            if(col.name == x->order->cols[i]->col_name) {
+                sel_cols.push_back({.tab_name=col.tab_name,.col_name=col.name});
+                is_desc.push_back(x->order->orderby_dirs[i]==ast::OrderBy_DESC);
+                break;
+            }
+        }
     }
-    return std::make_shared<SortPlan>(T_Sort, std::move(plan), sel_col, 
-                                    x->order->orderby_dir == ast::OrderBy_DESC);
+    return std::make_shared<SortPlan>(T_Sort,std::move(plan),std::move(sel_cols),std::move(is_desc));
 }
 
 
@@ -459,8 +464,10 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         std::shared_ptr<plannerInfo> root = std::make_shared<plannerInfo>(x);
         // 生成select语句的查询执行计划
         std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
-        plannerRoot = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
+        auto dml = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
                                                     std::vector<Condition>(), std::vector<SetClause>());
+        if (x->has_limit) dml->limit_val = x->limit_val;
+        plannerRoot = dml;
     } else {
         throw InternalError("Unexpected AST root");
     }

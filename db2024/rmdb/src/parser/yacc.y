@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE SUM MAX MIN COUNT AS
+WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE SUM MAX MIN COUNT AS LIMIT
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -51,7 +51,7 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP 
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
 %type <sv_conds> whereClause optWhereClause
-%type <sv_orderby>  order_clause opt_order_clause
+%type <sv_orderby>  order_list opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
 %type <sv_setKnobType> set_knob_type
 
@@ -160,10 +160,18 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM tableList optWhereClause opt_order_clause
+    |   SELECT selector FROM tableList optWhereClause opt_order_clause opt_limit_clause
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        auto stmt = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        int lim = $<sv_int>7;
+        if (lim > 0) { stmt->has_limit = true; stmt->limit_val = lim; }
+        $$ = stmt;
     }
+    ;
+
+opt_limit_clause:
+        /* empty */ { $<sv_int>$ = 0; }
+    |   LIMIT VALUE_INT { $<sv_int>$ = $2; }
     ;
 
 fieldList:
@@ -443,19 +451,23 @@ tableList:
     ;
 
 opt_order_clause:
-    ORDER BY order_clause      
-    { 
-        $$ = $3; 
-    }
-    |   /* epsilon */ { /* ignore*/ }
+    ORDER BY order_list   { $$ = $3; }
+    |   /* epsilon */      { $$ = nullptr; }
     ;
 
-order_clause:
-      col  opt_asc_desc 
-    { 
-        $$ = std::make_shared<OrderBy>($1, $2);
+order_list:
+      col opt_asc_desc
+    {
+        auto o = std::make_shared<OrderBy>();
+        o->cols.push_back($1); o->orderby_dirs.push_back($2);
+        $$ = o;
     }
-    ;   
+    |   order_list ',' col opt_asc_desc
+    {
+        $1->cols.push_back($3); $1->orderby_dirs.push_back($4);
+        $$ = $1;
+    }
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }

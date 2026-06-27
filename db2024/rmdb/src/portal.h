@@ -37,11 +37,12 @@ typedef enum portalTag{
 
 struct PortalStmt {
     portalTag tag;
-    
+
     std::vector<TabCol> sel_cols;
     std::unique_ptr<AbstractExecutor> root;
     std::shared_ptr<Plan> plan;
-    
+    int limit_val = 0;
+
     PortalStmt(portalTag tag_, std::vector<TabCol> sel_cols_, std::unique_ptr<AbstractExecutor> root_, std::shared_ptr<Plan> plan_) :
             tag(tag_), sel_cols(std::move(sel_cols_)), root(std::move(root_)), plan(std::move(plan_)) {}
 };
@@ -72,7 +73,9 @@ class Portal
                 {
                     std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
                     std::unique_ptr<AbstractExecutor> root= convert_plan_executor(p, context);
-                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    auto stmt = std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    stmt->limit_val = x->limit_val;
+                    return stmt;
                 }
                     
                 case T_Update:
@@ -134,7 +137,7 @@ class Portal
         switch(portal->tag) {
             case PORTAL_ONE_SELECT:
             {
-                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context);
+                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context, portal->limit_val);
                 break;
             }
 
@@ -195,8 +198,8 @@ class Portal
                                 std::move(right), std::move(x->conds_));
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 
-                                            x->sel_col_, x->is_desc_);
+            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                            x->sel_cols_, x->is_desc_);
         }
         return nullptr;
     }
