@@ -1,0 +1,16 @@
+-- 系统故障恢复测试
+-- 单连接串行执行，测试WAL日志和crash恢复
+
+create table t1 (id int, num int);
+begin;
+insert into t1 values(1, 1);
+commit;
+
+begin;
+insert into t1 values(2, 2);
+-- 此处未commit，模拟crash（服务端接收kill信号）
+-- 恢复后应只有id=1的行
+
+-- 重启系统后查询预期结果:
+-- | id | num |
+-- | 1 | 1 |

@@ -32,6 +32,11 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         txn->set_state(TransactionState::GROWING);
         std::unique_lock<std::mutex> lock(latch_);
         txn_map[txn_id] = txn;
+        // 记录begin日志
+        if (log_manager != nullptr) {
+            auto log_rec = new BeginLogRecord(txn_id);
+            txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
+        }
     }
     return txn;
 }
@@ -58,6 +63,21 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         lock_manager_->unlock(txn, lid);
     }
     lock_set->clear();
+    // 记录commit日志并刷盘
+    if (log_manager != nullptr) {
+        auto log_rec = new CommitLogRecord(txn->get_transaction_id());
+        txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
+        log_manager->flush_log_to_disk();
+    }
+    // 刷所有表的数据页和文件头到磁盘
+    for (auto &entry : sm_manager_->fhs_) {
+        int fd = entry.second->GetFd();
+        // 先写文件头（包含num_pages等元数据）
+        auto fhdr = entry.second->get_file_hdr();
+        sm_manager_->get_disk_manager()->write_page(fd, RM_FILE_HDR_PAGE, (char*)&fhdr, sizeof(RmFileHdr));
+        // 再刷所有缓冲池页面
+        sm_manager_->get_bpm()->flush_all_pages(fd);
+    }
     txn->set_state(TransactionState::COMMITTED);
 }
 
@@ -137,5 +157,11 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
         lock_manager_->unlock(txn, lid);
     }
     lock_set->clear();
+    // 记录abort日志
+    if (log_manager != nullptr) {
+        auto log_rec = new AbortLogRecord(txn->get_transaction_id());
+        txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
+        log_manager->flush_log_to_disk();
+    }
     txn->set_state(TransactionState::ABORTED);
 }
