@@ -106,6 +106,8 @@ void *client_handler(void *sock_fd) {
         }
         if (strcmp(data_recv, "crash") == 0) {
             std::cout << "Server crash" << std::endl;
+            // 模拟崩溃前刷出所有日志，确保已提交事务的日志落盘
+            log_manager->flush_log_to_disk();
             exit(1);
         }
 
@@ -143,8 +145,15 @@ void *client_handler(void *sock_fd) {
                     data_send[str.length()] = '\0';
                     offset = str.length();
 
-                    // 回滚事务
-                    txn_manager->abort(context->txn_, log_manager.get());
+                    // 回滚事务（用 try-catch 保护，防止二次异常导致 server 退出）
+                    try {
+                        txn_manager->abort(context->txn_, log_manager.get());
+                    } catch (...) {
+                        std::cerr << "abort in exception handler failed" << std::endl;
+                    }
+                    // abort() 内部已 delete txn，必须置空防止后续 use-after-free
+                    context->txn_ = nullptr;
+                    txn_id = INVALID_TXN_ID;
                     std::cout << e.GetInfo() << std::endl;
 
                     std::fstream outfile;
@@ -159,6 +168,16 @@ void *client_handler(void *sock_fd) {
                     data_send[e.get_msg_len()] = '\n';
                     data_send[e.get_msg_len() + 1] = '\0';
                     offset = e.get_msg_len() + 1;
+
+                    // 尝试回滚事务
+                    if (context->txn_ != nullptr) {
+                        try {
+                            txn_manager->abort(context->txn_, log_manager.get());
+                        } catch (...) {}
+                        // abort() 内部已 delete txn，必须置空防止后续 use-after-free
+                        context->txn_ = nullptr;
+                    }
+                    txn_id = INVALID_TXN_ID;
 
                     // 将报错信息写入output.txt
                     std::fstream outfile;
@@ -177,11 +196,32 @@ void *client_handler(void *sock_fd) {
         if (write(fd, data_send, offset + 1) == -1) {
             break;
         }
-        // 如果是单挑语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
-        if(context->txn_->get_txn_mode() == false)
-        {
-            txn_manager->commit(context->txn_, context->log_mgr_);
+        // 如果是单条语句，需要按照一个完整的事务来执行，所以执行完当前语句后，自动提交事务
+        // 注意：隐式自动提交必须在 try 保护内执行，防止 flush 等 I/O 异常导致 server 退出
+        if (context->txn_ != nullptr && context->txn_->get_txn_mode() == false) {
+            try {
+                txn_manager->commit(context->txn_, context->log_mgr_);
+                context->txn_ = nullptr;  // commit 内部已 delete txn
+                txn_id = INVALID_TXN_ID;
+            } catch (RMDBError &e) {
+                std::cerr << "auto-commit failed: " << e.what() << std::endl;
+                // 提交失败，尝试回滚
+                try {
+                    txn_manager->abort(context->txn_, log_manager.get());
+                } catch (...) {}
+                context->txn_ = nullptr;  // abort 内部已 delete txn
+                txn_id = INVALID_TXN_ID;
+                // 将 failure 写回客户端
+                std::string fail_msg = "failure\n";
+                memcpy(data_send, fail_msg.c_str(), fail_msg.length());
+                offset = fail_msg.length();
+                if (write(fd, data_send, offset + 1) == -1) { break; }
+            } catch (...) {
+                std::cerr << "auto-commit failed with unknown exception" << std::endl;
+                txn_id = INVALID_TXN_ID;
+            }
         }
+        delete context;
     }
 
     // Clear
@@ -294,6 +334,22 @@ int main(int argc, char **argv) {
         recovery->analyze();
         recovery->redo();
         recovery->undo();
+
+        // 重建索引（redo/undo 只恢复了表数据，索引需要重建）
+        sm_manager->rebuild_indexes();
+
+        // 强制刷出恢复阶段修改的所有脏页（表数据、索引页、元数据），
+        // 确保 truncate_log 删除日志后恢复结果不丢失。
+        for (auto &entry : sm_manager->fhs_) {
+            buffer_pool_manager->flush_all_pages(entry.second->GetFd());
+        }
+        for (auto &entry : sm_manager->ihs_) {
+            buffer_pool_manager->flush_all_pages(entry.second->GetFd());
+        }
+        sm_manager->flush_meta();
+
+        // 截断日志：恢复完成后清空日志文件，防止旧日志在后续重启时被重复回放
+        recovery->truncate_log();
         
         // 开启服务端，开始接受客户端连接
         start_server();

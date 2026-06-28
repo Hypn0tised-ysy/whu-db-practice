@@ -47,6 +47,7 @@ class SmManager {
     ~SmManager() {}
 
     BufferPoolManager* get_bpm() { return buffer_pool_manager_; }
+    DiskManager* get_disk_manager() { return disk_manager_; }
 
     RmManager* get_rm_manager() { return rm_manager_; }  
 
@@ -66,6 +67,8 @@ class SmManager {
 
     void show_tables(Context* context);
 
+    void show_index(const std::string& tab_name, Context* context);
+
     void desc_table(const std::string& tab_name, Context* context);
 
     void create_table(const std::string& tab_name, const std::vector<ColDef>& col_defs, Context* context);
@@ -75,6 +78,8 @@ class SmManager {
     void create_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context);
 
     void drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context);
-    
+
     void drop_index(const std::string& tab_name, const std::vector<ColMeta>& col_names, Context* context);
+
+    void rebuild_indexes();
 };

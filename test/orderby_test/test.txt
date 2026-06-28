@@ -1,0 +1,9 @@
+create table orders (company char(10), order_number int);
+insert into orders values('AAA',12);
+insert into orders values('ABB',13);
+insert into orders values('ABC',19);
+insert into orders values('ACA',1);
+SELECT company, order_number FROM orders ORDER BY order_number;
+SELECT company, order_number FROM orders ORDER BY company, order_number;
+SELECT company, order_number FROM orders ORDER BY company DESC, order_number ASC;
+SELECT company, order_number FROM orders ORDER BY order_number ASC LIMIT 2;

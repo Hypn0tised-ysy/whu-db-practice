@@ -23,15 +23,73 @@ See the Mulan PSL v2 for more details. */
 #include "record_printer.h"
 
 // 目前的索引匹配规则为：完全匹配索引字段，且全部为单点查询，不会自动调整where条件的顺序
+// 已修改为：支持最左前缀匹配，支持条件重排序，支持范围查询
 bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_conds, std::vector<std::string>& index_col_names) {
     index_col_names.clear();
-    for(auto& cond: curr_conds) {
-        if(cond.is_rhs_val && cond.op == OP_EQ && cond.lhs_col.tab_name.compare(tab_name) == 0)
-            index_col_names.push_back(cond.lhs_col.col_name);
-    }
     TabMeta& tab = sm_manager_->db_.get_table(tab_name);
-    if(tab.is_index(index_col_names)) return true;
-    return false;
+
+    // Build a multimap from column name to condition for quick lookup
+    std::multimap<std::string, Condition> cond_map;
+    for (auto& cond : curr_conds) {
+        if (cond.is_rhs_val && cond.lhs_col.tab_name == tab_name) {
+            cond_map.emplace(cond.lhs_col.col_name, cond);
+        }
+    }
+
+    // Track the best matching index
+    int best_match_len = 0;
+    int best_index_col_num = 0;
+
+    for (auto& index : tab.indexes) {
+        int match_len = 0;
+
+        for (int i = 0; i < index.col_num; i++) {
+            std::string col_name = index.cols[i].name;
+            auto it = cond_map.find(col_name);
+            if (it == cond_map.end()) {
+                // This column not in conditions - stop matching
+                break;
+            }
+
+            // Check if ANY condition on this column is usable
+            bool has_eq = false, has_range = false;
+            auto range = cond_map.equal_range(col_name);
+            for (auto ci = range.first; ci != range.second; ++ci) {
+                if (ci->second.op == OP_EQ) has_eq = true;
+                else has_range = true;
+            }
+
+            if (i < index.col_num - 1) {
+                // Not the last column in index - must have EQ to continue
+                if (has_eq) {
+                    match_len++;
+                } else if (has_range) {
+                    match_len++;
+                    break;
+                } else {
+                    break;
+                }
+            } else {
+                // Last column - any condition works
+                match_len++;
+                break;  // No more columns to match
+            }
+        }
+
+        // Select best index: prefer longest match, then prefer shorter index
+        if (match_len > best_match_len ||
+            (match_len == best_match_len && match_len > 0 && index.col_num < best_index_col_num)) {
+            best_match_len = match_len;
+            best_index_col_num = index.col_num;
+            // Record the full index column names
+            index_col_names.clear();
+            for (int i = 0; i < index.col_num; i++) {
+                index_col_names.push_back(index.cols[i].name);
+            }
+        }
+    }
+
+    return best_match_len > 0;
 }
 
 /**
@@ -152,7 +210,7 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
         bool index_exist = get_index_cols(tables[i], curr_conds, index_col_names);
         if (index_exist == false) {  // 该表没有索引
             index_col_names.clear();
-            table_scan_executors[i] = 
+            table_scan_executors[i] =
                 std::make_shared<ScanPlan>(T_SeqScan, sm_manager_, tables[i], curr_conds, index_col_names);
         } else {  // 存在索引
             table_scan_executors[i] =
@@ -185,6 +243,11 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
             std::shared_ptr<Plan> left , right;
             left = pop_scan(scantbl, it->lhs_col.tab_name, joined_tables, table_scan_executors);
             right = pop_scan(scantbl, it->rhs_col.tab_name, joined_tables, table_scan_executors);
+            if (left == nullptr || right == nullptr) {
+                // 条件中引用的表不在扫描列表中，跳过此条件
+                it++;
+                continue;
+            }
             std::vector<Condition> join_conds{*it};
             //建立join
             // 判断使用哪种join方式
@@ -203,6 +266,11 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
             // table_join_executors = std::make_shared<JoinPlan>(T_NestLoop, std::move(left), std::move(right), join_conds);
             it = conds.erase(it);
             break;
+        }
+        // 如果所有连接条件都被跳过（pop_scan 返回空），退化为无条件连接
+        if (table_join_executors == nullptr) {
+            table_join_executors = table_scan_executors[0];
+            scantbl[0] = 1;
         }
         // 根据连接条件，生成第2-n层join
         it = conds.begin();
@@ -275,13 +343,18 @@ std::shared_ptr<Plan> Planner::generate_sort_plan(std::shared_ptr<Query> query, 
         const auto &sel_tab_cols = sm_manager_->db_.get_table(sel_tab_name).cols;
         all_cols.insert(all_cols.end(), sel_tab_cols.begin(), sel_tab_cols.end());
     }
-    TabCol sel_col;
-    for (auto &col : all_cols) {
-        if(col.name.compare(x->order->cols->col_name) == 0 )
-        sel_col = {.tab_name = col.tab_name, .col_name = col.name};
+    std::vector<TabCol> sel_cols;
+    std::vector<bool> is_desc;
+    for (size_t i = 0; i < x->order->cols.size(); i++) {
+        for (auto &col : all_cols) {
+            if(col.name == x->order->cols[i]->col_name) {
+                sel_cols.push_back({.tab_name=col.tab_name,.col_name=col.name});
+                is_desc.push_back(x->order->orderby_dirs[i]==ast::OrderBy_DESC);
+                break;
+            }
+        }
     }
-    return std::make_shared<SortPlan>(T_Sort, std::move(plan), sel_col, 
-                                    x->order->orderby_dir == ast::OrderBy_DESC);
+    return std::make_shared<SortPlan>(T_Sort,std::move(plan),std::move(sel_cols),std::move(is_desc));
 }
 
 
@@ -381,8 +454,10 @@ std::shared_ptr<Plan> Planner::do_planner(std::shared_ptr<Query> query, Context 
         std::shared_ptr<plannerInfo> root = std::make_shared<plannerInfo>(x);
         // 生成select语句的查询执行计划
         std::shared_ptr<Plan> projection = generate_select_plan(std::move(query), context);
-        plannerRoot = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
+        auto dml = std::make_shared<DMLPlan>(T_select, projection, std::string(), std::vector<Value>(),
                                                     std::vector<Condition>(), std::vector<SetClause>());
+        if (x->has_limit) dml->limit_val = x->limit_val;
+        plannerRoot = dml;
     } else {
         throw InternalError("Unexpected AST root");
     }

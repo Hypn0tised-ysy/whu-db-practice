@@ -12,6 +12,7 @@ See the Mulan PSL v2 for more details. */
 #include <vector>
 #include <string>
 #include <memory>
+#include "defs.h"
 
 enum JoinType {
     INNER_JOIN, LEFT_JOIN, RIGHT_JOIN, FULL_JOIN
@@ -19,7 +20,7 @@ enum JoinType {
 namespace ast {
 
 enum SvType {
-    SV_TYPE_INT, SV_TYPE_FLOAT, SV_TYPE_STRING, SV_TYPE_BOOL
+    SV_TYPE_INT, SV_TYPE_FLOAT, SV_TYPE_STRING, SV_TYPE_BOOL, SV_TYPE_BIGINT, SV_TYPE_DATETIME
 };
 
 enum SvCompOp {
@@ -45,6 +46,11 @@ struct Help : public TreeNode {
 };
 
 struct ShowTables : public TreeNode {
+};
+
+struct ShowIndex : public TreeNode {
+    std::string tab_name;
+    ShowIndex(std::string tab_name_) : tab_name(std::move(tab_name_)) {}
 };
 
 struct TxnBegin : public TreeNode {
@@ -120,9 +126,10 @@ struct Value : public Expr {
 };
 
 struct IntLit : public Value {
-    int val;
+    int64_t val;
+    bool overflow;
 
-    IntLit(int val_) : val(val_) {}
+    IntLit(int64_t val_, bool overflow_ = false) : val(val_), overflow(overflow_) {}
 };
 
 struct FloatLit : public Value {
@@ -143,12 +150,21 @@ struct BoolLit : public Value {
     BoolLit(bool val_) : val(val_) {}
 };
 
+using ::AggType;
+using ::AGG_NONE; using ::AGG_SUM; using ::AGG_MAX; using ::AGG_MIN;
+using ::AGG_COUNT; using ::AGG_COUNT_STAR;
+
 struct Col : public Expr {
     std::string tab_name;
     std::string col_name;
+    AggType agg_type = AGG_NONE;
+    std::string alias;  // AS alias for aggregate output
 
     Col(std::string tab_name_, std::string col_name_) :
             tab_name(std::move(tab_name_)), col_name(std::move(col_name_)) {}
+
+    Col(std::string tab_name_, std::string col_name_, AggType agg, std::string als) :
+            tab_name(std::move(tab_name_)), col_name(std::move(col_name_)), agg_type(agg), alias(std::move(als)) {}
 };
 
 struct SetClause : public TreeNode {
@@ -170,10 +186,9 @@ struct BinaryExpr : public TreeNode {
 
 struct OrderBy : public TreeNode
 {
-    std::shared_ptr<Col> cols;
-    OrderByDir orderby_dir;
-    OrderBy( std::shared_ptr<Col> cols_, OrderByDir orderby_dir_) :
-       cols(std::move(cols_)), orderby_dir(std::move(orderby_dir_)) {}
+    std::vector<std::shared_ptr<Col>> cols;
+    std::vector<OrderByDir> orderby_dirs;
+    OrderBy() = default;
 };
 
 struct InsertStmt : public TreeNode {
@@ -223,6 +238,8 @@ struct SelectStmt : public TreeNode {
     
     bool has_sort;
     std::shared_ptr<OrderBy> order;
+    bool has_limit = false;
+    int limit_val = 0;
 
 
     SelectStmt(std::vector<std::shared_ptr<Col>> cols_,
@@ -246,10 +263,11 @@ struct SetStmt : public TreeNode {
 
 // Semantic value
 struct SemValue {
-    int sv_int;
+    int64_t sv_int;
     float sv_float;
     std::string sv_str;
     bool sv_bool;
+    bool sv_overflow = false;
     OrderByDir sv_orderby_dir;
     std::vector<std::string> sv_strs;
 

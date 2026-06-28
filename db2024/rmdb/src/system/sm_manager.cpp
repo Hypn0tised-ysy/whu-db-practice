@@ -78,6 +78,7 @@ void SmManager::drop_db(const std::string& db_name) {
     if (system(cmd.c_str()) < 0) {
         throw UnixError();
     }
+
 }
 
 /**
@@ -85,7 +86,42 @@ void SmManager::drop_db(const std::string& db_name) {
  * @param {string&} db_name 数据库名称，与文件夹同名
  */
 void SmManager::open_db(const std::string& db_name) {
-    
+    if (!is_dir(db_name)) {
+        throw DatabaseNotFoundError(db_name);
+    }
+    if (chdir(db_name.c_str()) < 0) {
+        throw UnixError();
+    }
+    // 打开元数据文件
+    std::ifstream ifs(DB_META_NAME);
+    if (!ifs.is_open()) {
+        throw InternalError("Cannot open db meta file");
+    }
+    ifs >> db_;
+    ifs.close();
+
+    // 打开所有表文件
+    for (auto &entry : db_.tabs_) {
+        auto &tab = entry.second;
+        fhs_.emplace(tab.name, rm_manager_->open_file(tab.name));
+    }
+
+    // 打开所有索引文件
+    for (auto &entry : db_.tabs_) {
+        auto &tab = entry.second;
+        for (auto &index : tab.indexes) {
+            std::string index_name = ix_manager_->get_index_name(tab.name, index.cols);
+            if (disk_manager_->is_file(index_name)) {
+                ihs_.emplace(index_name, ix_manager_->open_index(tab.name, index.cols));
+            }
+        }
+    }
+
+    // 打开日志文件
+    if (disk_manager_->is_file(LOG_FILE_NAME)) {
+        int log_fd = disk_manager_->open_file(LOG_FILE_NAME);
+        disk_manager_->SetLogFd(log_fd);
+    }
 }
 
 /**
@@ -101,7 +137,25 @@ void SmManager::flush_meta() {
  * @description: 关闭数据库并把数据落盘
  */
 void SmManager::close_db() {
-    
+    // 刷元数据
+    flush_meta();
+
+    // 关闭所有表文件
+    for (auto &entry : fhs_) {
+        rm_manager_->close_file(entry.second.get());
+    }
+    fhs_.clear();
+
+    // 关闭索引文件
+    for (auto &entry : ihs_) {
+        ix_manager_->close_index(entry.second.get());
+    }
+    ihs_.clear();
+
+    // 返回上级目录
+    if (chdir("..") < 0) {
+        throw UnixError();
+    }
 }
 
 /**
@@ -126,9 +180,30 @@ void SmManager::show_tables(Context* context) {
 }
 
 /**
+ * @description: 显示表上的索引
+ * @param {string&} tab_name 表名称
+ * @param {Context*} context
+ */
+void SmManager::show_index(const std::string& tab_name, Context* context) {
+    TabMeta &tab = db_.get_table(tab_name);
+    std::fstream outfile;
+    outfile.open("output.txt", std::ios::out | std::ios::app);
+    for (auto &index : tab.indexes) {
+        std::string cols_str = "(";
+        for (size_t i = 0; i < index.cols.size(); i++) {
+            if (i > 0) cols_str += ",";
+            cols_str += index.cols[i].name;
+        }
+        cols_str += ")";
+        outfile << "| " << tab_name << " | unique | " << cols_str << " |\n";
+    }
+    outfile.close();
+}
+
+/**
  * @description: 显示表的元数据
  * @param {string&} tab_name 表名称
- * @param {Context*} context 
+ * @param {Context*} context
  */
 void SmManager::desc_table(const std::string& tab_name, Context* context) {
     TabMeta &tab = db_.get_table(tab_name);
@@ -188,7 +263,30 @@ void SmManager::create_table(const std::string& tab_name, const std::vector<ColD
  * @param {Context*} context
  */
 void SmManager::drop_table(const std::string& tab_name, Context* context) {
-    
+    if (!db_.is_table(tab_name)) {
+        throw TableNotFoundError(tab_name);
+    }
+
+    TabMeta &tab = db_.get_table(tab_name);
+
+    // 关闭并删除表文件
+    rm_manager_->close_file(fhs_[tab_name].get());
+    rm_manager_->destroy_file(tab_name);
+    fhs_.erase(tab_name);
+
+    // 删除索引文件
+    for (auto &index : tab.indexes) {
+        std::string index_name = ix_manager_->get_index_name(tab_name, index.cols);
+        ix_manager_->close_index(ihs_[index_name].get());
+        ix_manager_->destroy_index(tab_name, index.cols);
+        ihs_.erase(index_name);
+    }
+
+    // 从元数据中删除表
+    db_.tabs_.erase(tab_name);
+
+    // 刷元数据
+    flush_meta();
 }
 
 /**
@@ -198,7 +296,63 @@ void SmManager::drop_table(const std::string& tab_name, Context* context) {
  * @param {Context*} context
  */
 void SmManager::create_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
-    
+    // Todo:
+    // 1. 检查索引是否已存在
+    // 2. 获取索引列元数据
+    // 3. 创建索引元数据并添加到表元数据中
+    // 4. 创建索引文件并打开
+    // 5. 从已有数据构建索引
+    // 6. 刷元数据
+    TabMeta &tab = db_.get_table(tab_name);
+
+    // Check if index already exists
+    if (tab.is_index(col_names)) {
+        throw IndexExistsError(tab_name, col_names);
+    }
+
+    // Build ColMeta for index columns
+    std::vector<ColMeta> index_cols;
+    int col_tot_len = 0;
+    for (auto &col_name : col_names) {
+        auto col = tab.get_col(col_name);
+        index_cols.push_back(*col);
+        col_tot_len += col->len;
+    }
+
+    // Create the index
+    IndexMeta index;
+    index.tab_name = tab_name;
+    index.col_num = col_names.size();
+    index.col_tot_len = col_tot_len;
+    index.cols = index_cols;
+    tab.indexes.push_back(index);
+
+    // Create index file
+    ix_manager_->create_index(tab_name, index_cols);
+
+    // Open the index file
+    std::string index_name = ix_manager_->get_index_name(tab_name, index_cols);
+    ihs_.emplace(index_name, ix_manager_->open_index(tab_name, index_cols));
+
+    // Build index from existing data
+    auto fh = fhs_.at(tab_name).get();
+    auto ih = ihs_.at(index_name).get();
+
+    RmScan scan(fh);
+    while (!scan.is_end()) {
+        auto rec = fh->get_record(scan.rid(), context);
+        char *key = new char[col_tot_len];
+        int offset = 0;
+        for (auto &col : index_cols) {
+            memcpy(key + offset, rec->data + col.offset, col.len);
+            offset += col.len;
+        }
+        ih->insert_entry(key, scan.rid(), context->txn_);
+        delete[] key;
+        scan.next();
+    }
+
+    flush_meta();
 }
 
 /**
@@ -208,15 +362,77 @@ void SmManager::create_index(const std::string& tab_name, const std::vector<std:
  * @param {Context*} context
  */
 void SmManager::drop_index(const std::string& tab_name, const std::vector<std::string>& col_names, Context* context) {
-    
+    // Todo:
+    // 1. 获取表元数据
+    // 2. 查找并删除索引元数据
+    // 3. 关闭并删除索引文件
+    // 4. 刷元数据
+    TabMeta &tab = db_.get_table(tab_name);
+
+    // Find and remove the index from tab meta
+    auto it = tab.get_index_meta(col_names);
+    std::string index_name = ix_manager_->get_index_name(tab_name, it->cols);
+
+    // Close and destroy index file
+    ix_manager_->close_index(ihs_.at(index_name).get());
+    ix_manager_->destroy_index(tab_name, it->cols);
+    ihs_.erase(index_name);
+
+    tab.indexes.erase(it);
+    flush_meta();
 }
 
 /**
- * @description: 删除索引
- * @param {string&} tab_name 表名称
- * @param {vector<ColMeta>&} 索引包含的字段元数据
- * @param {Context*} context
+ * @description: 删除索引 (by ColMeta)
  */
 void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMeta>& cols, Context* context) {
-    
+    std::vector<std::string> col_names;
+    for (auto &col : cols) {
+        col_names.push_back(col.name);
+    }
+    drop_index(tab_name, col_names, context);
+}
+
+/**
+ * @description: 恢复后重建所有索引，确保索引与表数据一致
+ * 由于 redo/undo 只操作了表数据，未维护索引，因此需要在恢复完成后重建索引
+ */
+void SmManager::rebuild_indexes() {
+    for (auto &tab_entry : db_.tabs_) {
+        auto &tab = tab_entry.second;
+        for (auto &index : tab.indexes) {
+            std::string index_name = ix_manager_->get_index_name(tab.name, index.cols);
+
+            // 关闭并销毁旧索引文件
+            auto it = ihs_.find(index_name);
+            if (it != ihs_.end()) {
+                ix_manager_->close_index(it->second.get());
+                ihs_.erase(it);
+            }
+            ix_manager_->destroy_index(tab.name, index.cols);
+
+            // 重新创建索引文件
+            ix_manager_->create_index(tab.name, index.cols);
+
+            // 重新打开索引文件
+            ihs_.emplace(index_name, ix_manager_->open_index(tab.name, index.cols));
+            auto ih = ihs_.at(index_name).get();
+
+            // 从表数据重建索引
+            auto fh = fhs_.at(tab.name).get();
+            RmScan scan(fh);
+            while (!scan.is_end()) {
+                auto rec = fh->get_record(scan.rid(), nullptr);
+                char *key = new char[index.col_tot_len];
+                int key_offset = 0;
+                for (auto &col : index.cols) {
+                    memcpy(key + key_offset, rec->data + col.offset, col.len);
+                    key_offset += col.len;
+                }
+                ih->insert_entry(key, scan.rid(), nullptr);
+                delete[] key;
+                scan.next();
+            }
+        }
+    }
 }

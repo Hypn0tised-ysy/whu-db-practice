@@ -20,8 +20,18 @@ static const bool binary_search = false;
 inline int ix_compare(const char *a, const char *b, ColType type, int col_len) {
     switch (type) {
         case TYPE_INT: {
-            int ia = *(int *)a;
-            int ib = *(int *)b;
+            int32_t ia = *(int32_t *)a;
+            int32_t ib = *(int32_t *)b;
+            return (ia < ib) ? -1 : ((ia > ib) ? 1 : 0);
+        }
+        case TYPE_BIGINT: {
+            int64_t ia = *(int64_t *)a;
+            int64_t ib = *(int64_t *)b;
+            return (ia < ib) ? -1 : ((ia > ib) ? 1 : 0);
+        }
+        case TYPE_DATETIME: {
+            int64_t ia = *(int64_t *)a;
+            int64_t ib = *(int64_t *)b;
             return (ia < ib) ? -1 : ((ia > ib) ? 1 : 0);
         }
         case TYPE_FLOAT: {
@@ -171,6 +181,8 @@ class IxIndexHandle {
 
    public:
     IxIndexHandle(DiskManager *disk_manager, BufferPoolManager *buffer_pool_manager, int fd);
+
+    int GetFd() const { return fd_; }
 
     // for search
     bool get_value(const char *key, std::vector<Rid> *result, Transaction *transaction);

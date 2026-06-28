@@ -1,0 +1,2 @@
+| id | name | score |
+| 1 | xiaohong | 99.000000 |

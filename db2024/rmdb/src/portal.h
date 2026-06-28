@@ -19,6 +19,7 @@ See the Mulan PSL v2 for more details. */
 #include "execution/executor_projection.h"
 #include "execution/executor_seq_scan.h"
 #include "execution/executor_index_scan.h"
+#include "execution/executor_aggregate.h"
 #include "execution/executor_update.h"
 #include "execution/executor_insert.h"
 #include "execution/executor_delete.h"
@@ -36,11 +37,12 @@ typedef enum portalTag{
 
 struct PortalStmt {
     portalTag tag;
-    
+
     std::vector<TabCol> sel_cols;
     std::unique_ptr<AbstractExecutor> root;
     std::shared_ptr<Plan> plan;
-    
+    int limit_val = 0;
+
     PortalStmt(portalTag tag_, std::vector<TabCol> sel_cols_, std::unique_ptr<AbstractExecutor> root_, std::shared_ptr<Plan> plan_) :
             tag(tag_), sel_cols(std::move(sel_cols_)), root(std::move(root_)), plan(std::move(plan_)) {}
 };
@@ -71,17 +73,30 @@ class Portal
                 {
                     std::shared_ptr<ProjectionPlan> p = std::dynamic_pointer_cast<ProjectionPlan>(x->subplan_);
                     std::unique_ptr<AbstractExecutor> root= convert_plan_executor(p, context);
-                    return std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    auto stmt = std::make_shared<PortalStmt>(PORTAL_ONE_SELECT, std::move(p->sel_cols_), std::move(root), plan);
+                    stmt->limit_val = x->limit_val;
+                    return stmt;
                 }
                     
                 case T_Update:
                 {
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                    // 用 while 循环代替 for 循环，避免 Next() 内部已将扫描推进到 end
+                    // 后，外层再无条件调用 nextTuple() 触发 RmScan::next() 的 assert(!is_end())
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
+                        auto rec = scan->Next();
+                        if (rec != nullptr) {
+                            rids.push_back(scan->rid());
+                        }
+                        // Next() 可能在内部递归时已推进到 end（返回 nullptr），
+                        // 此时必须跳过 nextTuple() 调用
+                        if (!scan->is_end()) {
+                            scan->nextTuple();
+                        }
                     }
-                    std::unique_ptr<AbstractExecutor> root =std::make_unique<UpdateExecutor>(sm_manager_, 
+                    std::unique_ptr<AbstractExecutor> root =std::make_unique<UpdateExecutor>(sm_manager_,
                                                             x->tab_name_, x->set_clauses_, x->conds_, rids, context);
                     return std::make_shared<PortalStmt>(PORTAL_DML_WITHOUT_SELECT, std::vector<TabCol>(), std::move(root), plan);
                 }
@@ -89,8 +104,17 @@ class Portal
                 {
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
-                        rids.push_back(scan->rid());
+                    // 用 while 循环代替 for 循环，避免 Next() 内部已将扫描推进到 end
+                    // 后，外层再无条件调用 nextTuple() 触发 RmScan::next() 的 assert(!is_end())
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
+                        auto rec = scan->Next();
+                        if (rec != nullptr) {
+                            rids.push_back(scan->rid());
+                        }
+                        if (!scan->is_end()) {
+                            scan->nextTuple();
+                        }
                     }
 
                     std::unique_ptr<AbstractExecutor> root =
@@ -123,7 +147,7 @@ class Portal
         switch(portal->tag) {
             case PORTAL_ONE_SELECT:
             {
-                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context);
+                ql->select_from(std::move(portal->root), std::move(portal->sel_cols), context, portal->limit_val);
                 break;
             }
 
@@ -156,7 +180,18 @@ class Portal
     std::unique_ptr<AbstractExecutor> convert_plan_executor(std::shared_ptr<Plan> plan, Context *context)
     {
         if(auto x = std::dynamic_pointer_cast<ProjectionPlan>(plan)){
-            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context), 
+            // Check if any selected column has an aggregate function
+            bool has_agg = false;
+            for (auto &col : x->sel_cols_) {
+                if (col.agg_type != ast::AGG_NONE) { has_agg = true; break; }
+            }
+            if (has_agg) {
+                // For aggregate queries: Scan -> Aggregate -> (Projection for output)
+                return std::make_unique<AggregateExecutor>(
+                    convert_plan_executor(x->subplan_, context),
+                    x->sel_cols_);
+            }
+            return std::make_unique<ProjectionExecutor>(convert_plan_executor(x->subplan_, context),
                                                         x->sel_cols_);
         } else if(auto x = std::dynamic_pointer_cast<ScanPlan>(plan)) {
             if(x->tag == T_SeqScan) {
@@ -168,13 +203,17 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
+            if (x->tag == T_SortMerge) {
+                // SortMerge join not yet implemented; fall back to NestedLoop.
+                // TODO: implement SortMergeJoinExecutor
+            }
             std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
-                                std::move(left), 
+                                std::move(left),
                                 std::move(right), std::move(x->conds_));
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {
-            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context), 
-                                            x->sel_col_, x->is_desc_);
+            return std::make_unique<SortExecutor>(convert_plan_executor(x->subplan_, context),
+                                            x->sel_cols_, x->is_desc_);
         }
         return nullptr;
     }

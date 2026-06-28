@@ -90,6 +90,11 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
                 sm_manager_->show_tables(context);
                 break;
             }
+            case T_ShowIndex:
+            {
+                sm_manager_->show_index(x->tab_name_, context);
+                break;
+            }
             case T_DescTable:
             {
                 sm_manager_->desc_table(x->tab_name_, context);
@@ -105,18 +110,25 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
                 txn_mgr_->commit(context->txn_, context->log_mgr_);
+                // 重置事务ID和上下文指针，确保下一条SQL创建新事务
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
-            }    
+            }
             case T_Transaction_rollback:
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
                 txn_mgr_->abort(context->txn_, context->log_mgr_);
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
-            }    
+            }
             case T_Transaction_abort:
             {
                 context->txn_ = txn_mgr_->get_transaction(*txn_id);
                 txn_mgr_->abort(context->txn_, context->log_mgr_);
+                *txn_id = INVALID_TXN_ID;
+                context->txn_ = nullptr;
                 break;
             }     
             default:
@@ -144,12 +156,17 @@ void QlManager::run_cmd_utility(std::shared_ptr<Plan> plan, txn_id_t *txn_id, Co
 }
 
 // 执行select语句，select语句的输出除了需要返回客户端外，还需要写入output.txt文件中
-void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, std::vector<TabCol> sel_cols, 
-                            Context *context) {
+void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, std::vector<TabCol> sel_cols,
+                            Context *context, int limit_val) {
     std::vector<std::string> captions;
     captions.reserve(sel_cols.size());
     for (auto &sel_col : sel_cols) {
-        captions.push_back(sel_col.col_name);
+        // Use alias if available, otherwise use column name
+        if (!sel_col.alias.empty()) {
+            captions.push_back(sel_col.alias);
+        } else {
+            captions.push_back(sel_col.col_name);
+        }
     }
 
     // Print header into buffer
@@ -171,14 +188,22 @@ void QlManager::select_from(std::unique_ptr<AbstractExecutor> executorTreeRoot, 
     // 执行query_plan
     for (executorTreeRoot->beginTuple(); !executorTreeRoot->is_end(); executorTreeRoot->nextTuple()) {
         auto Tuple = executorTreeRoot->Next();
+        if (Tuple == nullptr) break;
+        if (limit_val > 0 && (int)num_rec >= limit_val) break;
         std::vector<std::string> columns;
         for (auto &col : executorTreeRoot->cols()) {
             std::string col_str;
             char *rec_buf = Tuple->data + col.offset;
             if (col.type == TYPE_INT) {
-                col_str = std::to_string(*(int *)rec_buf);
+                col_str = std::to_string(*(int32_t *)rec_buf);
+            } else if (col.type == TYPE_BIGINT) {
+                col_str = std::to_string(*(int64_t *)rec_buf);
+            } else if (col.type == TYPE_DATETIME) {
+                col_str = format_datetime(*(int64_t *)rec_buf);
             } else if (col.type == TYPE_FLOAT) {
-                col_str = std::to_string(*(float *)rec_buf);
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << *(float *)rec_buf;
+                col_str = oss.str();
             } else if (col.type == TYPE_STRING) {
                 col_str = std::string((char *)rec_buf, col.len);
                 col_str.resize(strlen(col_str.c_str()));

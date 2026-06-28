@@ -1,0 +1,11 @@
+-- 测试点3：COUNT(), COUNT(*)
+
+create table aggregate (id int,name char(8),val float);
+
+insert into aggregate values (1,'qwerasdf',1.0);
+insert into aggregate values (2,'qwerasdf',2.0);
+insert into aggregate values (3,'uiophjkl',2.0);
+
+select COUNT(*) as count_row from aggregate;
+select COUNT(id) as count_id from aggregate;
+select COUNT(name) as count_name from aggregate where val = 2.0;

@@ -22,11 +22,17 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
     {
         // 处理表名
         query->tables = std::move(x->tabs);
-        /** TODO: 检查表是否存在 */
+        // 检查表是否存在
+        for (auto &tab_name : query->tables) {
+            if (!sm_manager_->db_.is_table(tab_name)) {
+                throw TableNotFoundError(tab_name);
+            }
+        }
 
         // 处理target list，再target list中添加上表名，例如 a.id
         for (auto &sv_sel_col : x->cols) {
-            TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name};
+            TabCol sel_col = {.tab_name = sv_sel_col->tab_name, .col_name = sv_sel_col->col_name,
+                              .alias = sv_sel_col->alias, .agg_type = sv_sel_col->agg_type};
             query->cols.push_back(sel_col);
         }
         
@@ -41,6 +47,8 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         } else {
             // infer table name from column name
             for (auto &sel_col : query->cols) {
+                // Skip column check for COUNT(*) which has no column reference
+                if (sel_col.agg_type == ast::AGG_COUNT_STAR) continue;
                 sel_col = check_column(all_cols, sel_col);  // 列元数据校验
             }
         }
@@ -48,13 +56,86 @@ std::shared_ptr<Query> Analyze::do_analyze(std::shared_ptr<ast::TreeNode> parse)
         get_clause(x->conds, query->conds);
         check_clause(query->tables, query->conds);
     } else if (auto x = std::dynamic_pointer_cast<ast::UpdateStmt>(parse)) {
-        /** TODO: */
+        // 处理表名
+        query->tables.push_back(x->tab_name);
+        /** TODO: 检查表是否存在 */
+        if (!sm_manager_->db_.is_table(x->tab_name)) {
+            throw TableNotFoundError(x->tab_name);
+        }
+
+        // 处理set子句
+        std::vector<ColMeta> all_cols;
+        get_all_cols(query->tables, all_cols);
+
+        for (auto &sv_set_clause : x->set_clauses) {
+            SetClause set_clause;
+            set_clause.lhs = {.tab_name = x->tab_name, .col_name = sv_set_clause->col_name};
+            set_clause.rhs = convert_sv_value(sv_set_clause->val);
+            // 检查列是否存在
+            set_clause.lhs = check_column(all_cols, set_clause.lhs);
+            // 检查类型匹配
+            TabMeta &tab = sm_manager_->db_.get_table(x->tab_name);
+            auto col = tab.get_col(set_clause.lhs.col_name);
+            // Handle DATETIME string conversion
+            if (col->type == TYPE_DATETIME && set_clause.rhs.type == TYPE_STRING) {
+                set_clause.rhs.set_datetime(parse_datetime(set_clause.rhs.str_val));
+            }
+            if (col->type != set_clause.rhs.type) {
+                bool compatible = false;
+                // INT <-> FLOAT
+                if ((col->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) ||
+                    (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT)) {
+                    compatible = true;
+                    if (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_INT) {
+                        set_clause.rhs.type = TYPE_FLOAT;
+                        set_clause.rhs.float_val = (float)set_clause.rhs.bigint_val;
+                    } else if (col->type == TYPE_INT && set_clause.rhs.type == TYPE_FLOAT) {
+                        set_clause.rhs.type = TYPE_INT;
+                        set_clause.rhs.bigint_val = (int64_t)set_clause.rhs.float_val;
+                    }
+                }
+                // INT <-> BIGINT (allow implicit conversion)
+                if ((col->type == TYPE_INT && set_clause.rhs.type == TYPE_BIGINT) ||
+                    (col->type == TYPE_BIGINT && set_clause.rhs.type == TYPE_INT)) {
+                    compatible = true;
+                    set_clause.rhs.type = col->type;
+                }
+                // BIGINT <-> FLOAT
+                if ((col->type == TYPE_BIGINT && set_clause.rhs.type == TYPE_FLOAT) ||
+                    (col->type == TYPE_FLOAT && set_clause.rhs.type == TYPE_BIGINT)) {
+                    compatible = true;
+                    set_clause.rhs.type = col->type;
+                    if (col->type == TYPE_FLOAT) {
+                        set_clause.rhs.float_val = (float)set_clause.rhs.bigint_val;
+                    } else {
+                        set_clause.rhs.bigint_val = (int64_t)set_clause.rhs.float_val;
+                    }
+                }
+                if (!compatible) {
+                    throw IncompatibleTypeError(coltype2str(col->type), coltype2str(set_clause.rhs.type));
+                }
+            }
+            query->set_clauses.push_back(set_clause);
+        }
+
+        // 处理where条件
+        get_clause(x->conds, query->conds);
+        check_clause(query->tables, query->conds);
 
     } else if (auto x = std::dynamic_pointer_cast<ast::DeleteStmt>(parse)) {
+        // 检查表是否存在
+        if (!sm_manager_->db_.is_table(x->tab_name)) {
+            throw TableNotFoundError(x->tab_name);
+        }
         //处理where条件
         get_clause(x->conds, query->conds);
-        check_clause({x->tab_name}, query->conds);        
+        check_clause({x->tab_name}, query->conds);
+
     } else if (auto x = std::dynamic_pointer_cast<ast::InsertStmt>(parse)) {
+        // 检查表是否存在
+        if (!sm_manager_->db_.is_table(x->tab_name)) {
+            throw TableNotFoundError(x->tab_name);
+        }
         // 处理insert 的values值
         for (auto &sv_val : x->vals) {
             query->values.push_back(convert_sv_value(sv_val));
@@ -84,8 +165,17 @@ TabCol Analyze::check_column(const std::vector<ColMeta> &all_cols, TabCol target
         }
         target.tab_name = tab_name;
     } else {
-        /** TODO: Make sure target column exists */
-        
+        // Make sure target column exists
+        bool found = false;
+        for (auto &col : all_cols) {
+            if (col.tab_name == target.tab_name && col.name == target.col_name) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            throw ColumnNotFoundError(target.tab_name + "." + target.col_name);
+        }
     }
     return target;
 }
@@ -131,6 +221,10 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
         ColType lhs_type = lhs_col->type;
         ColType rhs_type;
         if (cond.is_rhs_val) {
+            // Handle DATETIME string conversion before init_raw
+            if (lhs_type == TYPE_DATETIME && cond.rhs_val.type == TYPE_STRING) {
+                cond.rhs_val.set_datetime(parse_datetime(cond.rhs_val.str_val));
+            }
             cond.rhs_val.init_raw(lhs_col->len);
             rhs_type = cond.rhs_val.type;
         } else {
@@ -139,7 +233,45 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
             rhs_type = rhs_col->type;
         }
         if (lhs_type != rhs_type) {
-            throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
+            bool compatible = false;
+            // INT <-> FLOAT
+            if ((lhs_type == TYPE_INT && rhs_type == TYPE_FLOAT) ||
+                (lhs_type == TYPE_FLOAT && rhs_type == TYPE_INT)) {
+                compatible = true;
+                if (cond.is_rhs_val) {
+                    if (lhs_type == TYPE_FLOAT && rhs_type == TYPE_INT) {
+                        cond.rhs_val.type = TYPE_FLOAT;
+                        cond.rhs_val.float_val = (float)cond.rhs_val.bigint_val;
+                    } else if (lhs_type == TYPE_INT && rhs_type == TYPE_FLOAT) {
+                        cond.rhs_val.type = TYPE_INT;
+                        cond.rhs_val.bigint_val = (int64_t)cond.rhs_val.float_val;
+                    }
+                }
+            }
+            // INT <-> BIGINT
+            if ((lhs_type == TYPE_INT && rhs_type == TYPE_BIGINT) ||
+                (lhs_type == TYPE_BIGINT && rhs_type == TYPE_INT)) {
+                compatible = true;
+                if (cond.is_rhs_val) {
+                    cond.rhs_val.type = lhs_type;
+                }
+            }
+            // BIGINT <-> FLOAT
+            if ((lhs_type == TYPE_BIGINT && rhs_type == TYPE_FLOAT) ||
+                (lhs_type == TYPE_FLOAT && rhs_type == TYPE_BIGINT)) {
+                compatible = true;
+                if (cond.is_rhs_val) {
+                    cond.rhs_val.type = lhs_type;
+                    if (lhs_type == TYPE_FLOAT) {
+                        cond.rhs_val.float_val = (float)cond.rhs_val.bigint_val;
+                    } else {
+                        cond.rhs_val.bigint_val = (int64_t)cond.rhs_val.float_val;
+                    }
+                }
+            }
+            if (!compatible) {
+                throw IncompatibleTypeError(coltype2str(lhs_type), coltype2str(rhs_type));
+            }
         }
     }
 }
@@ -148,7 +280,16 @@ void Analyze::check_clause(const std::vector<std::string> &tab_names, std::vecto
 Value Analyze::convert_sv_value(const std::shared_ptr<ast::Value> &sv_val) {
     Value val;
     if (auto int_lit = std::dynamic_pointer_cast<ast::IntLit>(sv_val)) {
-        val.set_int(int_lit->val);
+        // Check for overflow during parsing
+        if (int_lit->overflow) {
+            throw RMDBError("Integer value out of BIGINT range");
+        }
+        // Store as bigint if value exceeds 32-bit range, otherwise as int
+        if (int_lit->val > INT32_MAX || int_lit->val < INT32_MIN) {
+            val.set_bigint(int_lit->val);
+        } else {
+            val.set_int(int_lit->val);
+        }
     } else if (auto float_lit = std::dynamic_pointer_cast<ast::FloatLit>(sv_val)) {
         val.set_float(float_lit->val);
     } else if (auto str_lit = std::dynamic_pointer_cast<ast::StringLit>(sv_val)) {

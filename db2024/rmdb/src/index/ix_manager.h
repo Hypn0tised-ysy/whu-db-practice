@@ -138,6 +138,14 @@ class IxManager {
         disk_manager_->destroy_file(ix_name);
     }
 
+    void flush_index(IxIndexHandle *ih) {
+        char* data = new char[ih->file_hdr_->tot_len_];
+        ih->file_hdr_->serialize(data);
+        disk_manager_->write_page(ih->fd_, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
+        delete[] data;
+        buffer_pool_manager_->flush_all_pages(ih->fd_);
+    }
+
     void destroy_index(const std::string &filename, const std::vector<std::string>& index_cols) {
         std::string ix_name = get_index_name(filename, index_cols);
         disk_manager_->destroy_file(ix_name);
@@ -162,6 +170,10 @@ class IxManager {
         disk_manager_->write_page(ih->fd_, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
         // 缓冲区的所有页刷到磁盘，注意这句话必须写在close_file前面
         buffer_pool_manager_->flush_all_pages(ih->fd_);
+        // 删除缓冲池中该fd的所有页面，避免fd重用后读到旧页面
+        for (int page_no = 0; page_no < ih->file_hdr_->num_pages_; page_no++) {
+            buffer_pool_manager_->delete_page(PageId{ih->fd_, page_no});
+        }
         disk_manager_->close_file(ih->fd_);
     }
 };

@@ -22,7 +22,7 @@ using namespace ast;
 
 // keywords
 %token SHOW TABLES CREATE TABLE DROP DESC INSERT INTO VALUES DELETE FROM ASC ORDER BY
-WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE
+WHERE UPDATE SET SELECT INT CHAR FLOAT BIGINT DATETIME INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_COMMIT TXN_ABORT TXN_ROLLBACK ORDER_BY ENABLE_NESTLOOP ENABLE_SORTMERGE SUM MAX MIN COUNT AS LIMIT
 // non-keywords
 %token LEQ NEQ GEQ T_EOF
 
@@ -44,12 +44,14 @@ WHERE UPDATE SET SELECT INT CHAR FLOAT INDEX AND JOIN EXIT HELP TXN_BEGIN TXN_CO
 %type <sv_str> tbName colName
 %type <sv_strs> tableList colNameList
 %type <sv_col> col
-%type <sv_cols> colList selector
+%type <sv_str> opt_as_alias
+%type <sv_cols> colList selector aggItemList
+%type <sv_col> aggItem
 %type <sv_set_clause> setClause
 %type <sv_set_clauses> setClauses
 %type <sv_cond> condition
 %type <sv_conds> whereClause optWhereClause
-%type <sv_orderby>  order_clause opt_order_clause
+%type <sv_orderby>  order_list opt_order_clause
 %type <sv_orderby_dir> opt_asc_desc
 %type <sv_setKnobType> set_knob_type
 
@@ -109,6 +111,10 @@ dbStmt:
     {
         $$ = std::make_shared<ShowTables>();
     }
+    |   SHOW INDEX FROM tbName
+    {
+        $$ = std::make_shared<ShowIndex>($4);
+    }
     ;
 
 setStmt:
@@ -154,10 +160,18 @@ dml:
     {
         $$ = std::make_shared<UpdateStmt>($2, $4, $5);
     }
-    |   SELECT selector FROM tableList optWhereClause opt_order_clause
+    |   SELECT selector FROM tableList optWhereClause opt_order_clause opt_limit_clause
     {
-        $$ = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        auto stmt = std::make_shared<SelectStmt>($2, $4, $5, $6);
+        int lim = $<sv_int>7;
+        if (lim > 0) { stmt->has_limit = true; stmt->limit_val = lim; }
+        $$ = stmt;
     }
+    ;
+
+opt_limit_clause:
+        /* empty */ { $<sv_int>$ = 0; }
+    |   LIMIT VALUE_INT { $<sv_int>$ = $2; }
     ;
 
 fieldList:
@@ -202,6 +216,14 @@ type:
     {
         $$ = std::make_shared<TypeLen>(SV_TYPE_FLOAT, sizeof(float));
     }
+    |   BIGINT
+    {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_BIGINT, sizeof(int64_t));
+    }
+    |   DATETIME
+    {
+        $$ = std::make_shared<TypeLen>(SV_TYPE_DATETIME, 8);
+    }
     ;
 
 valueList:
@@ -218,7 +240,9 @@ valueList:
 value:
         VALUE_INT
     {
-        $$ = std::make_shared<IntLit>($1);
+        auto intlit = std::make_shared<IntLit>($1);
+        intlit->overflow = $<sv_bool>1;
+        $$ = intlit;
     }
     |   VALUE_FLOAT
     {
@@ -344,6 +368,71 @@ selector:
         $$ = {};
     }
     |   colList
+    |   aggItemList
+    ;
+
+aggItemList:
+        aggItem
+    {
+        $$ = std::vector<std::shared_ptr<Col>>{$1};
+    }
+    |   aggItemList ',' aggItem
+    {
+        $$.push_back($3);
+    }
+    ;
+
+aggItem:
+        col
+    {
+        $$ = $1;
+    }
+    |   SUM '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_SUM;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   MAX '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_MAX;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   MIN '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_MIN;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   COUNT '(' '*' ')' opt_as_alias
+    {
+        auto c = std::make_shared<Col>("", "");
+        c->agg_type = AGG_COUNT_STAR;
+        c->alias = $5;
+        $$ = c;
+    }
+    |   COUNT '(' col ')' opt_as_alias
+    {
+        auto c = $3;
+        c->agg_type = AGG_COUNT;
+        c->alias = $5;
+        $$ = c;
+    }
+    ;
+
+opt_as_alias:
+        /* empty */
+    {
+        $$ = "";
+    }
+    |   AS IDENTIFIER
+    {
+        $$ = $2;
+    }
     ;
 
 tableList:
@@ -362,19 +451,23 @@ tableList:
     ;
 
 opt_order_clause:
-    ORDER BY order_clause      
-    { 
-        $$ = $3; 
-    }
-    |   /* epsilon */ { /* ignore*/ }
+    ORDER BY order_list   { $$ = $3; }
+    |   /* epsilon */      { $$ = nullptr; }
     ;
 
-order_clause:
-      col  opt_asc_desc 
-    { 
-        $$ = std::make_shared<OrderBy>($1, $2);
+order_list:
+      col opt_asc_desc
+    {
+        auto o = std::make_shared<OrderBy>();
+        o->cols.push_back($1); o->orderby_dirs.push_back($2);
+        $$ = o;
     }
-    ;   
+    |   order_list ',' col opt_asc_desc
+    {
+        $1->cols.push_back($3); $1->orderby_dirs.push_back($4);
+        $$ = $1;
+    }
+    ;
 
 opt_asc_desc:
     ASC          { $$ = OrderBy_ASC;     }

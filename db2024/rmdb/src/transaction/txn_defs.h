@@ -28,23 +28,27 @@ enum class WType { INSERT_TUPLE = 0, DELETE_TUPLE, UPDATE_TUPLE};
 /**
  * @brief 事务的写操作记录，用于事务的回滚
  * INSERT
- * --------------------------------
- * | wtype | tab_name | tuple_rid |
- * --------------------------------
+ * --------------------------------------------------------
+ * | wtype | tab_name | tuple_rid | tuple_value            |
+ * --------------------------------------------------------
  * DELETE / UPDATE
- * ----------------------------------------------
- * | wtype | tab_name | tuple_rid | tuple_value |
- * ----------------------------------------------
+ * --------------------------------------------------------
+ * | wtype | tab_name | tuple_rid | tuple_value            |
+ * --------------------------------------------------------
+ * UPDATE (insert_new_record 模式，多列索引全部列被修改时)
+ * --------------------------------------------------------
+ * | wtype | tab_name | tuple_rid | tuple_value | new_rid |
+ * --------------------------------------------------------
+ * 所有操作类型都保存 record 数据，确保 abort 时无需回读已删除/已修改的记录。
  */
 class WriteRecord {
    public:
     WriteRecord() = default;
 
-    // constructor for insert operation
-    WriteRecord(WType wtype, const std::string &tab_name, const Rid &rid)
-        : wtype_(wtype), tab_name_(tab_name), rid_(rid) {}
-
-    // constructor for delete & update operation
+    // Unified constructor for all write types — always stores the record data.
+    // For INSERT: rid is the newly inserted rid, record is the inserted data.
+    // For DELETE: rid is the deleted rid, record is the pre-delete data.
+    // For UPDATE: rid is the old rid, record is the pre-update data.
     WriteRecord(WType wtype, const std::string &tab_name, const Rid &rid, const RmRecord &record)
         : wtype_(wtype), tab_name_(tab_name), rid_(rid), record_(record) {}
 
@@ -58,11 +62,20 @@ class WriteRecord {
 
     inline std::string &GetTableName() { return tab_name_; }
 
+    // For UPDATE with insert_new_record: when all columns of a multi-column index
+    // are modified, a new record is inserted at a different rid while the old record
+    // is kept. We need to remember the new rid so abort can delete it.
+    inline void set_new_rid(const Rid &new_rid) { new_rid_ = new_rid; has_new_rid_ = true; }
+    inline bool has_new_rid() const { return has_new_rid_; }
+    inline const Rid &get_new_rid() const { return new_rid_; }
+
    private:
     WType wtype_;
     std::string tab_name_;
     Rid rid_;
     RmRecord record_;
+    Rid new_rid_{};
+    bool has_new_rid_{false};
 };
 
 /* 多粒度锁，加锁对象的类型，包括记录和表 */
