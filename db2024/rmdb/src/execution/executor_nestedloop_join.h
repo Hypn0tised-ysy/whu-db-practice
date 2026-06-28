@@ -108,6 +108,16 @@ public:
     bool is_end() const override { return isend_; }
 
 private:
+    // Helper: find a column in a column vector by TabCol (matches both table name and column name)
+    static const ColMeta* find_col(const std::vector<ColMeta> &cols, const TabCol &target) {
+        for (auto &c : cols) {
+            if (c.tab_name == target.tab_name && c.name == target.col_name) {
+                return &c;
+            }
+        }
+        return nullptr;
+    }
+
     bool check_current_pair() {
         auto right_rec = right_->Next();
         if (!right_rec) return false;
@@ -117,25 +127,32 @@ private:
         const char *left_data = left_block_[block_idx_].data();
 
         for (auto &cond : fed_conds_) {
-            const char *lhs_val = nullptr, *rhs_val = nullptr;
-            ColType lhs_type; int lhs_len;
+            // Resolve LHS column: search BOTH left and right column sets
+            const char *lhs_val = nullptr;
+            ColType lhs_type = TYPE_INT; int lhs_len = 0;
 
-            if (cond.lhs_col.tab_name == left_cols[0].tab_name) {
-                for (auto &c : left_cols) { if (c.name == cond.lhs_col.col_name) { lhs_val = left_data + c.offset; lhs_type = c.type; lhs_len = c.len; break; } }
-            } else {
-                for (auto &c : right_cols) { if (c.name == cond.lhs_col.col_name) { lhs_val = right_data.data() + c.offset; lhs_type = c.type; lhs_len = c.len; break; } }
+            if (auto *fc = find_col(left_cols, cond.lhs_col)) {
+                lhs_val = left_data + fc->offset;
+                lhs_type = fc->type; lhs_len = fc->len;
+            } else if (auto *fc = find_col(right_cols, cond.lhs_col)) {
+                lhs_val = right_data.data() + fc->offset;
+                lhs_type = fc->type; lhs_len = fc->len;
             }
 
             if (cond.is_rhs_val) {
                 if (!eval_rhs_val(lhs_val, lhs_type, lhs_len, cond.op, cond.rhs_val)) return false;
             } else {
-                ColType rhs_type; int rhs_len;
-                if (cond.rhs_col.tab_name == left_cols[0].tab_name) {
-                    for (auto &c : left_cols) { if (c.name == cond.rhs_col.col_name) { rhs_val = left_data + c.offset; rhs_type = c.type; rhs_len = c.len; break; } }
-                } else {
-                    for (auto &c : right_cols) { if (c.name == cond.rhs_col.col_name) { rhs_val = right_data.data() + c.offset; rhs_type = c.type; rhs_len = c.len; break; } }
+                // Resolve RHS column: search BOTH left and right column sets
+                const char *rhs_val = nullptr;
+
+                if (auto *fc = find_col(left_cols, cond.rhs_col)) {
+                    rhs_val = left_data + fc->offset;
+                } else if (auto *fc = find_col(right_cols, cond.rhs_col)) {
+                    rhs_val = right_data.data() + fc->offset;
                 }
-                if (!compare(lhs_val, rhs_val, lhs_type, cond.op)) return false;
+                // Use LHS type (both sides should be same type for a join condition),
+                // but pass LHS length for STRING comparison safety
+                if (!compare(lhs_val, rhs_val, lhs_type, cond.op, lhs_len)) return false;
             }
         }
         return true;
@@ -152,12 +169,12 @@ private:
         return false;
     }
 
-    bool compare(const char *a, const char *b, ColType t, CompOp op) {
+    bool compare(const char *a, const char *b, ColType t, CompOp op, int len) {
         if (t == TYPE_INT) return cmp_i(*(int32_t*)a, *(int32_t*)b, op);
         if (t == TYPE_BIGINT || t == TYPE_DATETIME) return cmp_i(*(int64_t*)a, *(int64_t*)b, op);
         if (t == TYPE_FLOAT) return cmp_f(*(float*)a, *(float*)b, op);
         if (t == TYPE_STRING) {
-            std::string sa(a, 256), sb(b, 256);
+            std::string sa(a, len), sb(b, len);
             sa.resize(strlen(sa.c_str())); sb.resize(strlen(sb.c_str()));
             return cmp_s(sa, sb, op);
         }
