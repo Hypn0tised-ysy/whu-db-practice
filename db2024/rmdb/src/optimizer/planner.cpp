@@ -267,6 +267,11 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
             it = conds.erase(it);
             break;
         }
+        // 如果所有连接条件都被跳过（pop_scan 返回空），退化为无条件连接
+        if (table_join_executors == nullptr) {
+            table_join_executors = table_scan_executors[0];
+            scantbl[0] = 1;
+        }
         // 根据连接条件，生成第2-n层join
         it = conds.begin();
         while (it != conds.end()) {

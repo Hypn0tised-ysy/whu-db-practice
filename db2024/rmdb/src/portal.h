@@ -82,12 +82,18 @@ class Portal
                 {
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                    // 用 while 循环代替 for 循环，避免 Next() 内部已将扫描推进到 end
+                    // 后，外层再无条件调用 nextTuple() 触发 RmScan::next() 的 assert(!is_end())
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
                         auto rec = scan->Next();
                         if (rec != nullptr) {
                             rids.push_back(scan->rid());
-                        } else {
-                            break;
+                        }
+                        // Next() 可能在内部递归时已推进到 end（返回 nullptr），
+                        // 此时必须跳过 nextTuple() 调用
+                        if (!scan->is_end()) {
+                            scan->nextTuple();
                         }
                     }
                     std::unique_ptr<AbstractExecutor> root =std::make_unique<UpdateExecutor>(sm_manager_,
@@ -98,12 +104,16 @@ class Portal
                 {
                     std::unique_ptr<AbstractExecutor> scan= convert_plan_executor(x->subplan_, context);
                     std::vector<Rid> rids;
-                    for (scan->beginTuple(); !scan->is_end(); scan->nextTuple()) {
+                    // 用 while 循环代替 for 循环，避免 Next() 内部已将扫描推进到 end
+                    // 后，外层再无条件调用 nextTuple() 触发 RmScan::next() 的 assert(!is_end())
+                    scan->beginTuple();
+                    while (!scan->is_end()) {
                         auto rec = scan->Next();
                         if (rec != nullptr) {
                             rids.push_back(scan->rid());
-                        } else {
-                            break;
+                        }
+                        if (!scan->is_end()) {
+                            scan->nextTuple();
                         }
                     }
 
@@ -193,8 +203,12 @@ class Portal
         } else if(auto x = std::dynamic_pointer_cast<JoinPlan>(plan)) {
             std::unique_ptr<AbstractExecutor> left = convert_plan_executor(x->left_, context);
             std::unique_ptr<AbstractExecutor> right = convert_plan_executor(x->right_, context);
+            if (x->tag == T_SortMerge) {
+                // SortMerge join not yet implemented; fall back to NestedLoop.
+                // TODO: implement SortMergeJoinExecutor
+            }
             std::unique_ptr<AbstractExecutor> join = std::make_unique<NestedLoopJoinExecutor>(
-                                std::move(left), 
+                                std::move(left),
                                 std::move(right), std::move(x->conds_));
             return join;
         } else if(auto x = std::dynamic_pointer_cast<SortPlan>(plan)) {

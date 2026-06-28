@@ -75,6 +75,7 @@ bool LockManager::lock(Transaction* txn, const LockDataId &lid, LM mode) {
             for (auto &r : q.request_queue_)
                 if (r.txn_id_ == txn->get_transaction_id() && r.granted_) { r.lock_mode_ = LM::S_IX; break; }
             q.group_lock_mode_ = upgrade_group(cur, LM::INTENTION_EXCLUSIVE);
+            txn->get_lock_set()->insert(lid);
             return true;
         }
         return true;

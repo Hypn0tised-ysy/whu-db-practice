@@ -10,8 +10,8 @@ See the Mulan PSL v2 for more details. */
 
 #pragma once
 
-#include <map>
-#include <unordered_map>
+#include <cstdint>
+#include <vector>
 #include "log_manager.h"
 #include "storage/disk_manager.h"
 #include "system/sm_manager.h"
@@ -34,8 +34,14 @@ public:
     void analyze();
     void redo();
     void undo();
+    void truncate_log();
+
 private:
-    LogBuffer buffer_;                                              // 读入日志
+    bool validate_log_boundary(int offset);
+    bool is_valid_log_type(LogType type);
+
+    std::vector<char> log_data_;                                    // 完整日志数据（动态扩容）
+    int log_data_size_ = 0;                                         // 实际读取的日志字节数
     DiskManager* disk_manager_;                                     // 用来读写文件
     BufferPoolManager* buffer_pool_manager_;                        // 对页面进行读写
     SmManager* sm_manager_;                                         // 访问数据库元数据

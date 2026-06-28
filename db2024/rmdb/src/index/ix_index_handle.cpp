@@ -312,6 +312,26 @@ void IxIndexHandle::insert_into_parent(IxNodeHandle *old_node, const char *key, 
 }
 
 page_id_t IxIndexHandle::insert_entry(const char *key, const Rid &value, Transaction *transaction) {
+    // 空树重建：adjust_root 在删除最后一条记录后将 root 设为 IX_NO_PAGE，
+    // 但之后若有插入需要能重新创建 root leaf 节点。
+    if (is_empty()) {
+        IxNodeHandle *new_root = create_node();
+        new_root->page_hdr->is_leaf = true;
+        new_root->page_hdr->parent = IX_NO_PAGE;
+        new_root->page_hdr->num_key = 0;
+        new_root->set_prev_leaf(IX_LEAF_HEADER_PAGE);
+        new_root->set_next_leaf(IX_LEAF_HEADER_PAGE);
+
+        file_hdr_->first_leaf_ = new_root->get_page_no();
+        file_hdr_->last_leaf_ = new_root->get_page_no();
+        update_root_page_no(new_root->get_page_no());
+
+        new_root->insert(key, value);
+        page_id_t leaf_page = new_root->get_page_no();
+        buffer_pool_manager_->unpin_page(new_root->get_page_id(), true);
+        return leaf_page;
+    }
+
     auto [leaf, root_latched] = find_leaf_page(key, Operation::INSERT, transaction);
     if (leaf == nullptr) {
         throw InternalError("Cannot find leaf page for insert");

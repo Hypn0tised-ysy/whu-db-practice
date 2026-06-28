@@ -59,8 +59,9 @@ class UpdateExecutor : public AbstractExecutor {
             auto rec = fh_->get_record(rid, context_);
 
             // 记录写操作（保存旧值，用于事务回滚）
+            WriteRecord *wr = nullptr;
             if (context_->txn_ != nullptr) {
-                auto wr = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *rec);
+                wr = new WriteRecord(WType::UPDATE_TUPLE, tab_name_, rid, *rec);
                 context_->txn_->append_write_record(wr);
             }
 
@@ -150,6 +151,8 @@ class UpdateExecutor : public AbstractExecutor {
             if (insert_new_record) {
                 // Insert a new record, keep the old one in the table
                 target_rid = fh_->insert_record(new_rec_data.data(), context_);
+                // 记录 new_rid，abort 时需要删除这条新插入的记录及其索引
+                if (wr != nullptr) wr->set_new_rid(target_rid);
             } else {
                 // Update record in-place
                 fh_->update_record(rid, new_rec_data.data(), context_);

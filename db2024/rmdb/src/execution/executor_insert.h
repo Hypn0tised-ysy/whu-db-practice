@@ -97,12 +97,47 @@ class InsertExecutor : public AbstractExecutor {
             context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
         }
 
-        // Insert into record file
-        rid_ = fh_->insert_record(rec.data, context_);
+        // WAL: 先确定 RID → 写日志 → 再写数据。
+        // 1. 确定 RID（不修改任何文件元数据，避免 crash 后元数据与日志不一致）
+        bool need_new_page = false;
+        if (fh_->get_file_hdr().first_free_page_no == RM_NO_PAGE) {
+            // 无空闲页：预测新页号为当前 num_pages，slot 0（新页第一个 slot）
+            rid_ = Rid{fh_->get_file_hdr().num_pages, 0};
+            need_new_page = true;
+        } else {
+            // 有空闲页：只读获取空闲 slot 位置
+            auto page_handle = fh_->fetch_page_handle(fh_->get_file_hdr().first_free_page_no);
+            int slot_no = Bitmap::first_bit(false, page_handle.bitmap, fh_->get_file_hdr().num_records_per_page);
+            assert(slot_no < fh_->get_file_hdr().num_records_per_page);
+            rid_ = Rid{page_handle.page->get_page_id().page_no, slot_no};
+            sm_manager_->get_bpm()->unpin_page(page_handle.page->get_page_id(), false);
+        }
+
+        // 2. 写 WAL 日志到缓冲区（必须在数据修改之前）
+        if (context_ != nullptr && context_->log_mgr_ != nullptr && context_->txn_ != nullptr) {
+            auto log_rec = new InsertLogRecord(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            log_rec->prev_lsn_ = context_->txn_->get_prev_lsn();
+            context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(log_rec));
+        }
+
+        // 3. 写入记录数据到预定位置
+        if (need_new_page) {
+            // 新建页并插入。此时 WAL 已写入，修改 file_hdr 是安全的。
+            // redo 阶段的 page 补齐逻辑保证恢复时缺失页能被重新创建。
+            rid_ = fh_->insert_record(rec.data, context_);
+        } else {
+            fh_->insert_record(rid_, rec.data);
+        }
 
         // 加记录级X锁（写锁）
         if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
             context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid_, fh_->GetFd());
+        }
+
+        // 记录写操作，用于事务回滚（保存 record 数据，避免 abort 时回读已删除记录）
+        if (context_->txn_ != nullptr) {
+            auto wr = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_, rec);
+            context_->txn_->append_write_record(wr);
         }
 
         // Insert into indexes
@@ -117,19 +152,6 @@ class InsertExecutor : public AbstractExecutor {
             }
             ih->insert_entry(key, rid_, context_->txn_);
             delete[] key;
-        }
-
-        // 记录日志（WAL），用于故障恢复
-        if (context_ != nullptr && context_->log_mgr_ != nullptr && context_->txn_ != nullptr) {
-            auto log_rec = new InsertLogRecord(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
-            log_rec->prev_lsn_ = context_->txn_->get_prev_lsn();
-            context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(log_rec));
-        }
-
-        // 记录写操作，用于事务回滚
-        if (context_->txn_ != nullptr) {
-            auto wr = new WriteRecord(WType::INSERT_TUPLE, tab_name_, rid_);
-            context_->txn_->append_write_record(wr);
         }
         return nullptr;
     }
