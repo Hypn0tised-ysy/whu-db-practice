@@ -37,13 +37,24 @@ class DeleteExecutor : public AbstractExecutor {
     }
 
     std::unique_ptr<RmRecord> Next() override {
+        // 加表级IX锁（意向排他锁）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
+        }
         for (auto &rid : rids_) {
-            // 加X锁
+            // 加记录级X锁
             if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }
 
             auto rec = fh_->get_record(rid, context_);
+
+            // 记录日志（WAL），用于故障恢复
+            if (context_ != nullptr && context_->log_mgr_ != nullptr && context_->txn_ != nullptr) {
+                auto log_rec = new DeleteLogRecord(context_->txn_->get_transaction_id(), *rec, rid, tab_name_);
+                log_rec->prev_lsn_ = context_->txn_->get_prev_lsn();
+                context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(log_rec));
+            }
 
             // 记录写操作（保存旧值，用于事务回滚）
             if (context_->txn_ != nullptr) {

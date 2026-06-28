@@ -38,6 +38,10 @@ class UpdateExecutor : public AbstractExecutor {
         context_ = context;
     }
     std::unique_ptr<RmRecord> Next() override {
+        // 加表级IX锁（意向排他锁）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
+        }
         // Initialize raw buffers for set clauses (only once)
         for (auto &set_clause : set_clauses_) {
             auto col = tab_.get_col(set_clause.lhs.col_name);
@@ -47,7 +51,7 @@ class UpdateExecutor : public AbstractExecutor {
         }
 
         for (auto &rid : rids_) {
-            // 加X锁
+            // 加记录级X锁
             if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
                 context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid, fh_->GetFd());
             }
@@ -129,6 +133,17 @@ class UpdateExecutor : public AbstractExecutor {
                         break;
                     }
                 }
+            }
+
+            // 记录日志（WAL），用于故障恢复
+            if (context_ != nullptr && context_->log_mgr_ != nullptr && context_->txn_ != nullptr) {
+                RmRecord old_rec(*rec);
+                RmRecord new_rec(new_rec_data.size());
+                memcpy(new_rec.data, new_rec_data.data(), new_rec_data.size());
+                auto log_rec = new UpdateLogRecord(context_->txn_->get_transaction_id(),
+                    old_rec, new_rec, rid, tab_name_);
+                log_rec->prev_lsn_ = context_->txn_->get_prev_lsn();
+                context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(log_rec));
             }
 
             Rid target_rid = rid;

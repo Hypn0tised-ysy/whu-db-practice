@@ -46,6 +46,10 @@ class SeqScanExecutor : public AbstractExecutor {
     }
 
     void beginTuple() override {
+        // 加表级S锁，防止幻读（阻止并发插入）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_table(context_->txn_, fh_->GetFd());
+        }
         // 初始化扫描
         scan_ = std::make_unique<RmScan>(fh_);
         rid_ = scan_->rid();

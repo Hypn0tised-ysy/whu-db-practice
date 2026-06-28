@@ -61,7 +61,21 @@ bool LockManager::lock(Transaction* txn, const LockDataId &lid, LM mode) {
                 if (r.txn_id_ != txn->get_transaction_id() && r.granted_)
                     { lk.unlock(); throw TransactionAbortException(txn->get_transaction_id(), AbortReason::UPGRADE_CONFLICT); }
             q.group_lock_mode_ = upgrade_group(cur, mode);
+            // 更新已授予的锁模式
+            for (auto &r : q.request_queue_)
+                if (r.txn_id_ == txn->get_transaction_id() && r.granted_) { r.lock_mode_ = mode; break; }
             txn->get_lock_set()->insert(lid); return true;
+        }
+        // Upgrade S→IX (resulting in SIX): must be the ONLY S holder
+        if (mode == LM::INTENTION_EXCLUSIVE && held_mode == LM::SHARED) {
+            for (auto &r : q.request_queue_)
+                if (r.txn_id_ != txn->get_transaction_id() && r.granted_ && r.lock_mode_ == LM::SHARED)
+                    { lk.unlock(); throw TransactionAbortException(txn->get_transaction_id(), AbortReason::UPGRADE_CONFLICT); }
+            // 升级为 SIX
+            for (auto &r : q.request_queue_)
+                if (r.txn_id_ == txn->get_transaction_id() && r.granted_) { r.lock_mode_ = LM::S_IX; break; }
+            q.group_lock_mode_ = upgrade_group(cur, LM::INTENTION_EXCLUSIVE);
+            return true;
         }
         return true;
     }

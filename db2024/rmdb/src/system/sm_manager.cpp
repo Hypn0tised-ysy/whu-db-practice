@@ -106,6 +106,17 @@ void SmManager::open_db(const std::string& db_name) {
         fhs_.emplace(tab.name, rm_manager_->open_file(tab.name));
     }
 
+    // 打开所有索引文件
+    for (auto &entry : db_.tabs_) {
+        auto &tab = entry.second;
+        for (auto &index : tab.indexes) {
+            std::string index_name = ix_manager_->get_index_name(tab.name, index.cols);
+            if (disk_manager_->is_file(index_name)) {
+                ihs_.emplace(index_name, ix_manager_->open_index(tab.name, index.cols));
+            }
+        }
+    }
+
     // 打开日志文件
     if (disk_manager_->is_file(LOG_FILE_NAME)) {
         int log_fd = disk_manager_->open_file(LOG_FILE_NAME);
@@ -380,4 +391,48 @@ void SmManager::drop_index(const std::string& tab_name, const std::vector<ColMet
         col_names.push_back(col.name);
     }
     drop_index(tab_name, col_names, context);
+}
+
+/**
+ * @description: 恢复后重建所有索引，确保索引与表数据一致
+ * 由于 redo/undo 只操作了表数据，未维护索引，因此需要在恢复完成后重建索引
+ */
+void SmManager::rebuild_indexes() {
+    for (auto &tab_entry : db_.tabs_) {
+        auto &tab = tab_entry.second;
+        for (auto &index : tab.indexes) {
+            std::string index_name = ix_manager_->get_index_name(tab.name, index.cols);
+
+            // 关闭并销毁旧索引文件
+            auto it = ihs_.find(index_name);
+            if (it != ihs_.end()) {
+                ix_manager_->close_index(it->second.get());
+                ihs_.erase(it);
+            }
+            ix_manager_->destroy_index(tab.name, index.cols);
+
+            // 重新创建索引文件
+            ix_manager_->create_index(tab.name, index.cols);
+
+            // 重新打开索引文件
+            ihs_.emplace(index_name, ix_manager_->open_index(tab.name, index.cols));
+            auto ih = ihs_.at(index_name).get();
+
+            // 从表数据重建索引
+            auto fh = fhs_.at(tab.name).get();
+            RmScan scan(fh);
+            while (!scan.is_end()) {
+                auto rec = fh->get_record(scan.rid(), nullptr);
+                char *key = new char[index.col_tot_len];
+                int key_offset = 0;
+                for (auto &col : index.cols) {
+                    memcpy(key + key_offset, rec->data + col.offset, col.len);
+                    key_offset += col.len;
+                }
+                ih->insert_entry(key, scan.rid(), nullptr);
+                delete[] key;
+                scan.next();
+            }
+        }
+    }
 }

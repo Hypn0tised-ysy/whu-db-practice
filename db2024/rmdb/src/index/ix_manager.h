@@ -138,6 +138,14 @@ class IxManager {
         disk_manager_->destroy_file(ix_name);
     }
 
+    void flush_index(IxIndexHandle *ih) {
+        char* data = new char[ih->file_hdr_->tot_len_];
+        ih->file_hdr_->serialize(data);
+        disk_manager_->write_page(ih->fd_, IX_FILE_HDR_PAGE, data, ih->file_hdr_->tot_len_);
+        delete[] data;
+        buffer_pool_manager_->flush_all_pages(ih->fd_);
+    }
+
     void destroy_index(const std::string &filename, const std::vector<std::string>& index_cols) {
         std::string ix_name = get_index_name(filename, index_cols);
         disk_manager_->destroy_file(ix_name);

@@ -35,6 +35,7 @@ Transaction * TransactionManager::begin(Transaction* txn, LogManager* log_manage
         // 记录begin日志
         if (log_manager != nullptr) {
             auto log_rec = new BeginLogRecord(txn_id);
+            log_rec->prev_lsn_ = txn->get_prev_lsn();
             txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
         }
     }
@@ -66,6 +67,7 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
     // 记录commit日志并刷盘
     if (log_manager != nullptr) {
         auto log_rec = new CommitLogRecord(txn->get_transaction_id());
+        log_rec->prev_lsn_ = txn->get_prev_lsn();
         txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
         log_manager->flush_log_to_disk();
     }
@@ -77,6 +79,10 @@ void TransactionManager::commit(Transaction* txn, LogManager* log_manager) {
         sm_manager_->get_disk_manager()->write_page(fd, RM_FILE_HDR_PAGE, (char*)&fhdr, sizeof(RmFileHdr));
         // 再刷所有缓冲池页面
         sm_manager_->get_bpm()->flush_all_pages(fd);
+    }
+    // 刷所有索引页到磁盘
+    for (auto &entry : sm_manager_->ihs_) {
+        sm_manager_->get_ix_manager()->flush_index(entry.second.get());
     }
     txn->set_state(TransactionState::COMMITTED);
 }
@@ -131,19 +137,28 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
             }
         } else if (wr->GetWriteType() == WType::UPDATE_TUPLE) {
             // UPDATE → 恢复旧记录
-            fh->update_record(wr->GetRid(), wr->GetRecord().data, nullptr);
+            // 先读取当前记录（新值），用于删除新索引条目
+            auto cur_rec = fh->get_record(wr->GetRid(), nullptr);
             TabMeta &tab = sm_manager_->db_.get_table(tab_name);
+
+            // 构建并删除新索引条目（从当前记录中获取 key）
             for (auto &index : tab.indexes) {
                 auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
-                // 删除新索引条目，插入旧索引条目
-                auto cur_rec = fh->get_record(wr->GetRid(), nullptr);
                 char *new_key = new char[index.col_tot_len];
                 int off = 0;
                 for (auto &col : index.cols) { memcpy(new_key+off, cur_rec->data+col.offset, col.len); off+=col.len; }
                 ih->delete_entry(new_key, txn);
                 delete[] new_key;
+            }
+
+            // 恢复旧记录
+            fh->update_record(wr->GetRid(), wr->GetRecord().data, nullptr);
+
+            // 插入旧索引条目（从 WriteRecord 中获取 key）
+            for (auto &index : tab.indexes) {
+                auto ih = sm_manager_->ihs_.at(sm_manager_->get_ix_manager()->get_index_name(tab_name, index.cols)).get();
                 char *old_key = new char[index.col_tot_len];
-                off = 0;
+                int off = 0;
                 for (auto &col : index.cols) { memcpy(old_key+off, wr->GetRecord().data+col.offset, col.len); off+=col.len; }
                 ih->insert_entry(old_key, wr->GetRid(), txn);
                 delete[] old_key;
@@ -160,6 +175,7 @@ void TransactionManager::abort(Transaction * txn, LogManager *log_manager) {
     // 记录abort日志
     if (log_manager != nullptr) {
         auto log_rec = new AbortLogRecord(txn->get_transaction_id());
+        log_rec->prev_lsn_ = txn->get_prev_lsn();
         txn->set_prev_lsn(log_manager->add_log_to_buffer(log_rec));
         log_manager->flush_log_to_disk();
     }

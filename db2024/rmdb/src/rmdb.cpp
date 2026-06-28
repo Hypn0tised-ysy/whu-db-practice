@@ -294,6 +294,9 @@ int main(int argc, char **argv) {
         recovery->analyze();
         recovery->redo();
         recovery->undo();
+
+        // 重建索引（redo/undo 只恢复了表数据，索引需要重建）
+        sm_manager->rebuild_indexes();
         
         // 开启服务端，开始接受客户端连接
         start_server();

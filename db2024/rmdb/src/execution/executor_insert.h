@@ -63,30 +63,44 @@ class InsertExecutor : public AbstractExecutor {
         }
 
         // Check uniqueness constraints BEFORE inserting
-        // For a unique index, each indexed column must be unique individually
+        // For composite indexes, check the FULL composite key, not individual columns
         for(size_t idx = 0; idx < tab_.indexes.size(); ++idx) {
             auto& index = tab_.indexes[idx];
 
-            // Scan all existing table records to check each indexed column
+            // Build the full composite key from the new record
+            std::vector<char> new_key(index.col_tot_len);
+            int key_offset = 0;
+            for(int j = 0; j < index.col_num; ++j) {
+                memcpy(new_key.data() + key_offset, rec.data + index.cols[j].offset, index.cols[j].len);
+                key_offset += index.cols[j].len;
+            }
+
+            // Scan all existing table records and compare full composite key
             RmScan table_scan(fh_);
             while (!table_scan.is_end()) {
                 auto existing_rec = fh_->get_record(table_scan.rid(), context_);
-                // Check each indexed column for duplicates
+                std::vector<char> existing_key(index.col_tot_len);
+                key_offset = 0;
                 for(int j = 0; j < index.col_num; ++j) {
-                    if (memcmp(rec.data + index.cols[j].offset,
-                               existing_rec->data + index.cols[j].offset,
-                               index.cols[j].len) == 0) {
-                        throw RMDBError("Duplicate entry for unique index");
-                    }
+                    memcpy(existing_key.data() + key_offset, existing_rec->data + index.cols[j].offset, index.cols[j].len);
+                    key_offset += index.cols[j].len;
+                }
+                if (memcmp(new_key.data(), existing_key.data(), index.col_tot_len) == 0) {
+                    throw RMDBError("Duplicate entry for unique index");
                 }
                 table_scan.next();
             }
         }
 
+        // 加表级IX锁（意向排他锁）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_IX_on_table(context_->txn_, fh_->GetFd());
+        }
+
         // Insert into record file
         rid_ = fh_->insert_record(rec.data, context_);
 
-        // 加X锁（写锁）
+        // 加记录级X锁（写锁）
         if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
             context_->lock_mgr_->lock_exclusive_on_record(context_->txn_, rid_, fh_->GetFd());
         }
@@ -103,6 +117,13 @@ class InsertExecutor : public AbstractExecutor {
             }
             ih->insert_entry(key, rid_, context_->txn_);
             delete[] key;
+        }
+
+        // 记录日志（WAL），用于故障恢复
+        if (context_ != nullptr && context_->log_mgr_ != nullptr && context_->txn_ != nullptr) {
+            auto log_rec = new InsertLogRecord(context_->txn_->get_transaction_id(), rec, rid_, tab_name_);
+            log_rec->prev_lsn_ = context_->txn_->get_prev_lsn();
+            context_->txn_->set_prev_lsn(context_->log_mgr_->add_log_to_buffer(log_rec));
         }
 
         // 记录写操作，用于事务回滚

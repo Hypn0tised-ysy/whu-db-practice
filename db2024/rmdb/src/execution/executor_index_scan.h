@@ -3,6 +3,7 @@ RMDB is licensed under Mulan PSL v2. */
 
 #pragma once
 
+#include <cfloat>
 #include "execution_defs.h"
 #include "execution_manager.h"
 #include "executor_abstract.h"
@@ -55,41 +56,104 @@ class IndexScanExecutor : public AbstractExecutor {
         fed_conds_ = conds_;
     }
 
-    // Build a key from conditions matching the first N index columns
-    // use_lower=true: fill with minimum values for unmatched columns
-    // use_lower=false: fill with maximum values for unmatched columns
+    // Write type-correct minimum value for a column
+    static void write_col_min(char *dest, ColType type, int len) {
+        switch (type) {
+            case TYPE_INT: { int32_t v = INT32_MIN; memcpy(dest, &v, len); break; }
+            case TYPE_BIGINT: case TYPE_DATETIME: { int64_t v = INT64_MIN; memcpy(dest, &v, len); break; }
+            case TYPE_FLOAT: { float v = -FLT_MAX; memcpy(dest, &v, len); break; }
+            case TYPE_STRING: memset(dest, 0, len); break;
+            default: memset(dest, 0, len); break;
+        }
+    }
+
+    // Write type-correct maximum value for a column
+    static void write_col_max(char *dest, ColType type, int len) {
+        switch (type) {
+            case TYPE_INT: { int32_t v = INT32_MAX; memcpy(dest, &v, len); break; }
+            case TYPE_BIGINT: case TYPE_DATETIME: { int64_t v = INT64_MAX; memcpy(dest, &v, len); break; }
+            case TYPE_FLOAT: { float v = FLT_MAX; memcpy(dest, &v, len); break; }
+            case TYPE_STRING: memset(dest, 0xFF, len); break;
+            default: memset(dest, 0xFF, len); break;
+        }
+    }
+
+    // Build a key from conditions matching index columns using leftmost prefix rule.
+    // - use_lower=true:  build lower bound key (inclusive start of scan range)
+    // - use_lower=false: build upper bound key (exclusive end of scan range)
+    //
+    // Leftmost prefix rule: once we hit a range condition (>, >=, <, <=) on column i,
+    // subsequent columns i+1, i+2, ... are filled with type-appropriate MIN/MAX values
+    // and conditions on those columns are evaluated by eval_conds as a filter.
     void build_bound_key(std::vector<char> &key_buf, bool use_lower) {
-        memset(key_buf.data(), use_lower ? 0 : 0xFF, col_tot_len_);
         int offset = 0;
+        bool stopped = false;
+
         for (size_t i = 0; i < index_meta_.cols.size(); i++) {
             auto &idx_col = index_meta_.cols[i];
-            bool found = false;
+
+            if (stopped) {
+                // Previous column used a range — fill this and remaining with min/max
+                if (use_lower)
+                    write_col_min(key_buf.data() + offset, idx_col.type, idx_col.len);
+                else
+                    write_col_max(key_buf.data() + offset, idx_col.type, idx_col.len);
+                offset += idx_col.len;
+                continue;
+            }
+
+            // Find condition matching this index column
+            bool found_eq = false, found_range = false;
+            const Value *range_val = nullptr;
+
             for (auto &cond : fed_conds_) {
                 if (!cond.is_rhs_val) continue;
                 if (cond.lhs_col.col_name != idx_col.name || cond.lhs_col.tab_name != tab_name_) continue;
 
-                // Determine if this condition applies to this bound
-                bool applies = false;
                 if (cond.op == OP_EQ) {
-                    applies = true;  // EQ applies to both bounds
-                } else if (use_lower && (cond.op == OP_GT || cond.op == OP_GE)) {
-                    applies = true;
-                } else if (!use_lower && (cond.op == OP_LT || cond.op == OP_LE)) {
-                    applies = true;
-                }
-
-                if (applies && cond.rhs_val.raw != nullptr) {
-                    memcpy(key_buf.data() + offset, cond.rhs_val.raw->data, idx_col.len);
-                    found = true;
-                    break;
+                    if (cond.rhs_val.raw != nullptr) {
+                        memcpy(key_buf.data() + offset, cond.rhs_val.raw->data, idx_col.len);
+                        found_eq = true;
+                        break;  // EQ takes priority
+                    }
+                } else if (!found_eq) {
+                    // Track range conditions
+                    bool applies = false;
+                    if (use_lower && (cond.op == OP_GT || cond.op == OP_GE)) applies = true;
+                    if (!use_lower && (cond.op == OP_LT || cond.op == OP_LE)) applies = true;
+                    if (applies && cond.rhs_val.raw != nullptr) {
+                        range_val = &cond.rhs_val;
+                        found_range = true;
+                    }
                 }
             }
-            // If no condition matches this column, leave as min/max (already set by memset)
-            offset += idx_col.len;
+
+            if (found_eq) {
+                // EQ on this column: exact value, continue to next column
+                offset += idx_col.len;
+                // No "stopped" — we continue to next column
+            } else if (found_range) {
+                // Range condition: use the value, then STOP (remaining cols get min/max)
+                memcpy(key_buf.data() + offset, range_val->raw->data, idx_col.len);
+                offset += idx_col.len;
+                stopped = true;
+            } else {
+                // No condition on this column: fill with min/max and STOP
+                if (use_lower)
+                    write_col_min(key_buf.data() + offset, idx_col.type, idx_col.len);
+                else
+                    write_col_max(key_buf.data() + offset, idx_col.type, idx_col.len);
+                offset += idx_col.len;
+                stopped = true;
+            }
         }
     }
 
     void beginTuple() override {
+        // 加表级S锁，防止幻读（阻止并发插入）
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_table(context_->txn_, fh_->GetFd());
+        }
         // If no conditions, scan entire index (for ordering)
         if (fed_conds_.empty()) {
             Iid lower = ih_->leaf_begin();
@@ -120,6 +184,10 @@ class IndexScanExecutor : public AbstractExecutor {
 
     std::unique_ptr<RmRecord> Next() override {
         if (scan_->is_end()) return nullptr;
+        // 加记录级S锁
+        if (context_ != nullptr && context_->txn_ != nullptr && context_->lock_mgr_ != nullptr) {
+            context_->lock_mgr_->lock_shared_on_record(context_->txn_, rid_, fh_->GetFd());
+        }
         auto rec = fh_->get_record(rid_, context_);
         if (eval_conds(fed_conds_, rec, cols_)) {
             return rec;

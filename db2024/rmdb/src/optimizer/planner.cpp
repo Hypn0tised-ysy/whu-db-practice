@@ -36,13 +36,12 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
         }
     }
 
-    // Try each index to find the best matching one
+    // Track the best matching index
     int best_match_len = 0;
-    std::vector<std::string> best_match_cols;
+    int best_index_col_num = 0;
 
     for (auto& index : tab.indexes) {
         int match_len = 0;
-        std::vector<std::string> matched_cols;
 
         for (int i = 0; i < index.col_num; i++) {
             std::string col_name = index.cols[i].name;
@@ -63,10 +62,8 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
             if (i < index.col_num - 1) {
                 // Not the last column in index - must have EQ to continue
                 if (has_eq) {
-                    matched_cols.push_back(col_name);
                     match_len++;
                 } else if (has_range) {
-                    matched_cols.push_back(col_name);
                     match_len++;
                     break;
                 } else {
@@ -74,42 +71,25 @@ bool Planner::get_index_cols(std::string tab_name, std::vector<Condition> curr_c
                 }
             } else {
                 // Last column - any condition works
-                matched_cols.push_back(col_name);
                 match_len++;
+                break;  // No more columns to match
             }
         }
 
-        if (match_len > best_match_len) {
-            if (match_len >= 1) {
-                best_match_len = match_len;
-                best_match_cols = matched_cols;
+        // Select best index: prefer longest match, then prefer shorter index
+        if (match_len > best_match_len ||
+            (match_len == best_match_len && match_len > 0 && index.col_num < best_index_col_num)) {
+            best_match_len = match_len;
+            best_index_col_num = index.col_num;
+            // Record the full index column names
+            index_col_names.clear();
+            for (int i = 0; i < index.col_num; i++) {
+                index_col_names.push_back(index.cols[i].name);
             }
         }
     }
 
-    if (best_match_len > 0) {
-        // Return ALL index column names (not just matched prefix)
-        // so that get_index_meta can find multi-column indexes
-        for (auto& index : tab.indexes) {
-            if (index.col_num >= best_match_len) {
-                bool prefix_match = true;
-                for (int i = 0; i < best_match_len; i++) {
-                    if (index.cols[i].name != best_match_cols[i]) {
-                        prefix_match = false;
-                        break;
-                    }
-                }
-                if (prefix_match && (int)index.col_num >= best_match_len) {
-                    index_col_names.clear();
-                    for (int i = 0; i < index.col_num; i++) {
-                        index_col_names.push_back(index.cols[i].name);
-                    }
-                    return true;
-                }
-            }
-        }
-    }
-    return false;
+    return best_match_len > 0;
 }
 
 /**
@@ -263,6 +243,11 @@ std::shared_ptr<Plan> Planner::make_one_rel(std::shared_ptr<Query> query)
             std::shared_ptr<Plan> left , right;
             left = pop_scan(scantbl, it->lhs_col.tab_name, joined_tables, table_scan_executors);
             right = pop_scan(scantbl, it->rhs_col.tab_name, joined_tables, table_scan_executors);
+            if (left == nullptr || right == nullptr) {
+                // 条件中引用的表不在扫描列表中，跳过此条件
+                it++;
+                continue;
+            }
             std::vector<Condition> join_conds{*it};
             //建立join
             // 判断使用哪种join方式
